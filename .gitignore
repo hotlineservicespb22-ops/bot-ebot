@@ -1,0 +1,31 @@
+# Environment variables (секреты)
+.env
+.env.txt
+*.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Databases
+*.db
+*.sqlite3
+
+# Logs
+*.log
+bot.log
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
