@@ -4,15 +4,22 @@ from aiogram import Router, Bot, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramAPIError
 from bot.database import Database
-from bot.keyboards import TicketCallback, engineer_select_client_kb, engineer_active_ticket_kb, engineer_default_menu_kb
+from bot.keyboards import (
+    TicketCallback, engineer_select_client_kb, engineer_active_ticket_kb,
+    engineer_default_menu_kb, engineer_list_kb, engineer_detail_kb
+)
+from bot.media import save_media_file
 router = Router()
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 async def safe_send(bot: Bot, chat_id: int, method_name: str, **kwargs):
+    """
+    Безопасная отправка сообщений через Telegram API.
+    parse_mode больше не передаётся локально — используется глобальный HTML из DefaultBotProperties.
+    """
     method = getattr(bot, method_name)
     try:
         await method(chat_id=chat_id, **kwargs)
@@ -30,16 +37,78 @@ def get_file_id_and_size(message: Message):
         return "send_voice", message.voice.file_id, message.voice.file_size
     if message.audio:
         return "send_audio", message.audio.file_id, message.audio.file_size
+    if message.animation:
+        return "send_animation", message.animation.file_id, message.animation.file_size
+    if message.sticker:
+        return "send_sticker", message.sticker.file_id, message.sticker.file_size
+    if message.location:
+        return "send_location", message.location, None
+    if message.contact:
+        return "send_contact", message.contact, None
     return None, None, None
 
-class EngineerRelayState(StatesGroup):
-    selecting_client = State()
+def format_ticket_detail(ticket) -> str:
+    """Форматирует детальную информацию о заявке для просмотра инженером."""
+    status_map = {
+        'open': '🟡 Нераспределена',
+        'in_progress': '🔵 В работе',
+        'completed': '✅ Завершена',
+        'canceled': '🚫 Отменена'
+    }
+    status = status_map.get(ticket['status'], ticket['status'])
+    text = (
+        f"🎫 <b>Заявка #{ticket['id']}</b>\n"
+        f"Статус: <b>{status}</b>\n\n"
+        f"🏢 <b>Компания/Город:</b> {html.escape(str(ticket['company_city'] or '—'))}\n"
+        f"🔧 <b>Станок:</b> {html.escape(str(ticket['machine_info'] or '—'))}\n"
+        f"📝 <b>Проблема:</b> {html.escape(str(ticket['problem'] or '—'))}\n"
+        f"📞 <b>Контакты:</b> {html.escape(str(ticket['contact'] or '—'))}\n"
+        f"👤 <b>Клиент:</b> {html.escape(str(ticket['client_name'] or '—'))}"
+    )
+    return text
+
+def build_list_text(tickets, mode: str) -> str:
+    """Строит текстовое описание списка заявок."""
+    header = "<b>📋 Ваши активные заявки:</b>" if mode == 'mine' else "<b>📥 Нераспределенные заявки:</b>"
+    lines = [header, ""]
+    for t in tickets:
+        company = str(t['company_city'] or '—')
+        problem = str(t['problem'] or '—')
+        lines.append(f"<b>Заявка #{t['id']}</b> — {html.escape(company)}: {html.escape(problem)}")
+    lines.append("")
+    lines.append("Выберите заявку для просмотра:")
+    return "\n".join(lines)
+
+async def show_ticket_list(msg, tickets, mode: str, db: Database, edit: bool = False):
+    """Показывает (или редактирует) сообщение со списком заявок."""
+    text = build_list_text(tickets, mode)
+    kb = engineer_list_kb(tickets, mode)
+    if edit:
+        await msg.edit_text(text, reply_markup=kb)
+    else:
+        await msg.answer(text, reply_markup=kb)
+
+async def get_ticket_list_data(db: Database, user_id: int, mode: str):
+    """Возвращает список заявок в зависимости от режима."""
+    if mode == 'mine':
+        return await db.get_active_tickets_for_engineer(user_id)
+    return await db.get_open_tickets()
+
+async def _require_engineer(callback: CallbackQuery, is_engineer: bool) -> bool:
+    """Проверяет права инженера для callback-запросов."""
+    if not is_engineer:
+        await callback.answer("У вас нет прав инженера.", show_alert=True)
+        return False
+    return True
 
 @router.callback_query(TicketCallback.filter(F.action == "select"))
-async def select_ticket_for_reply(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext):
+async def select_ticket_for_reply(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):
+    if not await _require_engineer(callback, is_engineer):
+        return
+    # Сбрасываем возможное FSM-состояние выбора клиента
+    await state.clear()
     await state.update_data(active_ticket_id=callback_data.ticket_id)
-    # Мы больше не в состоянии "выбора клиента", но сохраняем данные.
-    await callback.message.edit_reply_markup(reply_markup=None) # Remove inline keyboard from previous message
+    await callback.message.edit_reply_markup(reply_markup=None)  # Remove inline keyboard from previous message
     await callback.message.answer(
         f"✅ Выбран чат по заявке #{callback_data.ticket_id}. Ваши следующие сообщения будут отправлены этому клиенту.",
         reply_markup=engineer_active_ticket_kb()
@@ -54,64 +123,212 @@ async def list_my_tickets(message: Message, db: Database, is_engineer: bool, sta
     user_id = message.from_user.id
     active_tickets = await db.get_active_tickets_for_engineer(user_id)
 
-    state_data = await state.get_data()
-    current_active_ticket_id = state_data.get("active_ticket_id")
-
-    response_text = "Выберите заявку для переключения активного чата:"
     if not active_tickets:
         await message.answer("У вас нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
         return
 
-    # Формируем и отправляем красивое HTML-сообщение со списком активных заявок
-    summary_text = "<b>Ваши активные заявки:</b>\n\n"
-    for ticket in active_tickets:
-        summary_text += (
-            f"<b>Заявка #{ticket['id']}</b>\n"
-            f"  Компания: {html.escape(ticket['company'])}\n"
-            f"  Оборудование: {html.escape(ticket['equipment_type'])}\n"
-            f"  Проблема: {html.escape(ticket['problem'])}\n\n"
-        )
-    
-    await message.answer(summary_text, parse_mode="HTML")
+    # Сохраняем данные для навигации по списку
+    ids = [t['id'] for t in active_tickets]
+    await state.update_data(ticket_view_mode='mine', ticket_view_ids=ids, ticket_view_index=0)
 
-    # Далее идет существующая логика для выбора активного чата
-    if current_active_ticket_id:
-        response_text += f"\n\nТекущая активная заявка для ответов: <b>#{current_active_ticket_id}</b>"
+    await show_ticket_list(message, active_tickets, 'mine', db)
+    await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb())
 
-    await message.answer(response_text, reply_markup=engineer_select_client_kb(active_tickets), parse_mode="HTML") # Inline keyboard
-    await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb()) # Revert to default ReplyKeyboardMarkup
+@router.message(F.text == "📥 Нераспределенные заявки")
+async def list_open_tickets(message: Message, db: Database, is_engineer: bool, state: FSMContext):
+    if not is_engineer:
+        return
+
+    open_tickets = await db.get_open_tickets()
+
+    if not open_tickets:
+        await message.answer("Нет нераспределенных заявок.", reply_markup=engineer_default_menu_kb())
+        return
+
+    # Сохраняем данные для навигации по списку
+    ids = [t['id'] for t in open_tickets]
+    await state.update_data(ticket_view_mode='open', ticket_view_ids=ids, ticket_view_index=0)
+
+    await show_ticket_list(message, open_tickets, 'open', db)
+    await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb())
+
+@router.callback_query(TicketCallback.filter(F.action == "view"))
+async def view_ticket(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
+    if not await _require_engineer(callback, is_engineer):
+        return
+    data = await state.get_data()
+    mode = data.get('ticket_view_mode', 'mine')
+    ids = data.get('ticket_view_ids') or []
+
+    # Если список устарел, пересоздаём его
+    if callback_data.ticket_id not in ids:
+        tickets = await get_ticket_list_data(db, callback.from_user.id, mode)
+        ids = [t['id'] for t in tickets]
+        await state.update_data(ticket_view_ids=ids)
+
+    if not ids:
+        await callback.answer("Список заявок пуст.", show_alert=True)
+        return
+
+    index = ids.index(callback_data.ticket_id)
+    await state.update_data(ticket_view_index=index)
+
+    ticket = await db.get_ticket(callback_data.ticket_id)
+    if not ticket:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        format_ticket_detail(ticket),
+        reply_markup=engineer_detail_kb(callback_data.ticket_id, mode, index, len(ids))
+    )
+    await callback.answer()
+
+@router.callback_query(TicketCallback.filter(F.action == "prev"))
+@router.callback_query(TicketCallback.filter(F.action == "next"))
+async def navigate_ticket(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
+    if not await _require_engineer(callback, is_engineer):
+        return
+    data = await state.get_data()
+    mode = data.get('ticket_view_mode', 'mine')
+    ids = data.get('ticket_view_ids') or []
+    index = data.get('ticket_view_index') or 0
+
+    if not ids:
+        await callback.answer("Список заявок устарел. Откройте его заново.", show_alert=True)
+        return
+
+    if callback_data.action == "prev":
+        index = max(0, index - 1)
+    else:
+        index = min(len(ids) - 1, index + 1)
+
+    await state.update_data(ticket_view_index=index)
+
+    ticket_id = ids[index]
+    ticket = await db.get_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        format_ticket_detail(ticket),
+        reply_markup=engineer_detail_kb(ticket_id, mode, index, len(ids))
+    )
+    await callback.answer()
+
+@router.callback_query(TicketCallback.filter(F.action == "back_to_list"))
+async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
+    if not await _require_engineer(callback, is_engineer):
+        return
+    data = await state.get_data()
+    mode = data.get('ticket_view_mode', 'mine')
+
+    tickets = await get_ticket_list_data(db, callback.from_user.id, mode)
+    if not tickets:
+        await callback.message.edit_text("Список пуст.")
+        await callback.answer()
+        return
+
+    # Обновляем сохранённый список (мог измениться)
+    ids = [t['id'] for t in tickets]
+    await state.update_data(ticket_view_ids=ids)
+
+    await show_ticket_list(callback.message, tickets, mode, db, edit=True)
+    await callback.answer()
+
+@router.callback_query(TicketCallback.filter(F.action == "noop"))
+async def noop(callback: CallbackQuery):
+    await callback.answer()
+
+async def _send_relayed_message(
+    bot: Bot,
+    target_id: int,
+    message: Message,
+    method: str,
+    file_id,
+    prefix: str,
+):
+    """Отправляет пересылаемое сообщение получателю (медиа/гео/контакт/текст)."""
+    if method == 'send_location':
+        await safe_send(bot, target_id, method, latitude=file_id.latitude, longitude=file_id.longitude)
+        return
+    if method == 'send_contact':
+        await safe_send(bot, target_id, method, phone_number=file_id.phone_number, first_name=file_id.first_name or '')
+        return
+    if file_id:
+        caption = f"<b>{prefix}</b>{html.escape(message.caption or '')}"
+        await safe_send(bot, target_id, method, **{method.replace('send_', ''): file_id, 'caption': caption})
+    elif message.text:
+        await safe_send(bot, target_id, "send_message", text=f"<b>{prefix}</b>{html.escape(message.text)}")
 
 @router.message()
 async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: bool, state: FSMContext):
     user_id = message.from_user.id
-    
+
     # 1. Logic for Client -> Engineer
     ticket = await db.get_active_ticket_for_client(user_id)
     if ticket:
         eng_id = ticket['engineer_id']
-        if not eng_id: # Should not happen if in_progress
+        if not eng_id:  # Заявка ещё не взята инженером (status = 'open')
+            await message.answer(
+                "⏳ Ваша заявка ещё ожидает назначения дежурного инженера. "
+                "Как только инженер подключится, ваши сообщения будут ему переданы."
+            )
             return
 
         method, file_id, file_size = get_file_id_and_size(message)
-        
-        prefix = f"💬 [Клиент | Заявка #{ticket['id']}]:\n"
 
-        if file_id:
-            if file_size and file_size > MAX_FILE_SIZE:
-                await message.answer("❌ Файл слишком большой (лимит 20 МБ).")
-                return
+        # Проверяем размер файла ДО сохранения в историю, чтобы не фиксировать недоставленное
+        if file_size and file_size > MAX_FILE_SIZE:
+            await message.answer("❌ Файл слишком большой (лимит 20 МБ).")
+            return
 
-            caption = f"<b>{prefix}</b>{html.escape(message.caption or '')}"
-            await safe_send(bot, eng_id, method, **{method.replace('send_', ''): file_id, 'caption': caption, 'parse_mode': "HTML"})
-        elif message.text:
-            await safe_send(bot, eng_id, "send_message", text=f"<b>{prefix}</b>{html.escape(message.text)}", parse_mode="HTML")
+        # Отображаем имя клиента, если есть; иначе название компании; иначе "Клиент"
+        display_name = (ticket['client_name'] or '').strip()
+        if not display_name:
+            display_name = (ticket['company_city'] or '').strip()
+        if not display_name:
+            display_name = "Клиент"
+        prefix = f"💬 [{html.escape(display_name)} | Заявка #{ticket['id']}]:\n"
+
+        # Сохраняем в историю переписки
+        await db.save_message(
+            ticket_id=ticket['id'],
+            sender_id=user_id,
+            sender_role='client',
+            text=message.text or message.caption or '',
+            media_type=file_id and method.replace('send_', '') or None
+        )
+
+        # Сохраняем медиафайл в папку заявки
+        if file_id and method not in ('send_location', 'send_contact'):
+            media_type = method.replace('send_', '')
+            file_path = await save_media_file(
+                bot=bot,
+                file_id=str(file_id),
+                ticket_id=ticket['id'],
+                media_type=media_type,
+                file_name=getattr(message, media_type, None) and getattr(getattr(message, media_type), 'file_name', None)
+            )
+            if file_path:
+                await db.save_media(
+                    ticket_id=ticket['id'],
+                    file_id=str(file_id),
+                    file_type=media_type,
+                    file_path=file_path,
+                    sender_id=user_id,
+                    sender_role='client'
+                )
+
+        await _send_relayed_message(bot, eng_id, message, method, file_id, prefix)
         return
 
     # 2. Logic for Engineer -> Client
     if is_engineer:
         active_tickets = await db.get_active_tickets_for_engineer(user_id)
         if not active_tickets:
-            return # Engineer is not working on any ticket
+            return  # Engineer is not working on any ticket
 
         target_ticket = None
         if len(active_tickets) == 1:
@@ -125,9 +342,8 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
                     if t['id'] == selected_id:
                         target_ticket = t
                         break
-            
+
             if not target_ticket:
-                await state.set_state(EngineerRelayState.selecting_client) # Set state to wait for selection
                 await message.answer(
                     "У вас несколько активных заявок. Выберите, кому ответить:",
                     reply_markup=engineer_select_client_kb(active_tickets)
@@ -136,15 +352,52 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
 
         client_id = target_ticket['client_id']
         method, file_id, file_size = get_file_id_and_size(message)
-        
-        prefix = "👨‍🔧 [Инженер]:\n"
-        
-        if file_id:
-            if file_size and file_size > MAX_FILE_SIZE:
-                await message.answer("❌ Файл слишком большой (лимит 20 МБ).")
-                return
-            caption = f"<b>{prefix}</b>{html.escape(message.caption or '')}"
-            await safe_send(bot, client_id, method, **{method.replace('send_', ''): file_id, 'caption': caption, 'parse_mode': "HTML"})
-        elif message.text:
-            await safe_send(bot, client_id, "send_message", text=f"<b>{prefix}</b>{html.escape(message.text)}", parse_mode="HTML")
+
+        # Проверяем размер файла ДО сохранения в историю
+        if file_size and file_size > MAX_FILE_SIZE:
+            await message.answer("❌ Файл слишком большой (лимит 20 МБ).")
+            return
+
+        # Отображаем имя инженера из БД, если есть; иначе "Инженер"
+        engineer_name = await db.get_engineer_name(user_id)
+        if not engineer_name:
+            engineer_name = "Инженер"
+        prefix = f"👨‍🔧 [{html.escape(engineer_name)}]:\n"
+
+        # Сохраняем в историю переписки
+        await db.save_message(
+            ticket_id=target_ticket['id'],
+            sender_id=user_id,
+            sender_role='engineer',
+            text=message.text or message.caption or '',
+            media_type=file_id and method.replace('send_', '') or None
+        )
+
+        # Сохраняем медиафайл в папку заявки
+        if file_id and method not in ('send_location', 'send_contact'):
+            media_type = method.replace('send_', '')
+            file_path = await save_media_file(
+                bot=bot,
+                file_id=str(file_id),
+                ticket_id=target_ticket['id'],
+                media_type=media_type,
+                file_name=getattr(message, media_type, None) and getattr(getattr(message, media_type), 'file_name', None)
+            )
+            if file_path:
+                await db.save_media(
+                    ticket_id=target_ticket['id'],
+                    file_id=str(file_id),
+                    file_type=media_type,
+                    file_path=file_path,
+                    sender_id=user_id,
+                    sender_role='engineer'
+                )
+
+        await _send_relayed_message(bot, client_id, message, method, file_id, prefix)
         return
+
+    # 3. Пользователь не имеет активной заявки и не является инженером
+    await message.answer(
+        "Я не понял вас. Используйте меню ниже, чтобы оформить заявку или задать вопрос.",
+        reply_markup=None
+    )

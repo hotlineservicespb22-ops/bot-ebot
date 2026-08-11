@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: hotline-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+      - .env.txt
+    volumes:
+      - ./hotline_service.db:/app/hotline_service.db
+      - ./bot.log:/app/bot.log
+      - ./media:/app/media
+      - ./.env.txt:/app/.env.txt
+    # Если используете Redis для FSM — раскомментируйте:
+    # depends_on:
+    #   - redis
+
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   container_name: hotline-redis

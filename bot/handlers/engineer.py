@@ -1,11 +1,14 @@
 import html
+import logging
 from aiogram import Router, Bot, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from bot.database import Database
-from bot.keyboards import TicketCallback, main_menu, engineer_default_menu_kb, engineer_active_ticket_kb, engineer_select_client_kb, engineer_ticket_control_kb, active_ticket_menu_kb
+from bot.config import BITRIX_ATTACH_FILES
+from bot.bitrix import create_task, upload_file_to_bitrix, send_message_to_chat
+from bot.keyboards import TicketCallback, main_menu, engineer_default_menu_kb, engineer_active_ticket_kb, engineer_select_client_kb, engineer_ticket_control_kb, active_ticket_menu_kb, rating_kb
+
+logger = logging.getLogger(__name__)
 
 
 router = Router()
@@ -34,20 +37,45 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
                         engineer_name = eng['name']
                         break
             await callback.message.edit_text(
-                callback.message.html_text + f"\n\n👨‍🔧 <b>Заявка уже в работе</b>",
-                parse_mode="HTML"
+                callback.message.html_text + f"\n\n👨‍🔧 <b>Заявка уже в работе</b>"
             )
         return
 
     # Устанавливаем эту заявку как активную для инженера
-    await state.update_data(active_ticket_id=ticket_id)
+    # Сбрасываем данные навигации по списку, т.к. состав списков изменился
+    await state.update_data(active_ticket_id=ticket_id, ticket_view_ids=[], ticket_view_index=0)
 
     ticket = await db.get_ticket(ticket_id)
-    
+    # Преобразуем sqlite3.Row в dict для безопасного доступа к полям
+    ticket_dict = dict(ticket) if ticket else {}
+
+    # Создаём задачу в Битрикс24 на инженера, взявшего заявку
+    task_id = await _create_bitrix_task_for_ticket(db, ticket)
+
+    # Отправляем уведомление в чат Битрикс24 о новой заявке
+    if task_id:
+        engineer_name = callback.from_user.full_name
+        # Получаем ID пользователя Битрикс24 для упоминания инженера в чате
+        bitrix_engineer_id = await db.get_bitrix_user_id(eng_id)
+        # Формируем упоминание инженера: [USER=ID]Имя[/USER]
+        if bitrix_engineer_id:
+            engineer_mention = f"[USER={bitrix_engineer_id}]{engineer_name}[/USER]"
+        else:
+            engineer_mention = html.escape(engineer_name)
+        # Ссылка на задачу в Битрикс24
+        task_url = f"https://crm.wattsan.ru/company/personal/user/{bitrix_engineer_id or ''}/tasks/task/view/{task_id}/"
+        chat_msg = (
+            f"🚨 [B]{engineer_mention}[/B] взял заявку [B]#{ticket_id}[/B] в работу.\n\n"
+            f"🏢 [B]Компания/Город:[/B] {html.escape(str(ticket_dict.get('company_city') or '—'))}\n"
+            f"🔧 [B]Станок:[/B] {html.escape(str(ticket_dict.get('machine_info') or '—'))}\n"
+            f"📝 [B]Проблема:[/B] {html.escape(str(ticket_dict.get('problem') or '—'))}\n\n"
+            f"📌 [B]Задача:[/B] [URL={task_url}]Заявка #{task_id}[/URL]"
+        )
+        await send_message_to_chat(chat_msg)
+
     await callback.message.edit_text(
         callback.message.html_text + f"\n\n👨‍🔧 <b>Взято в работу инженером:</b> {html.escape(callback.from_user.full_name)}",
-        reply_markup=engineer_ticket_control_kb(ticket_id),
-        parse_mode="HTML"
+        reply_markup=engineer_ticket_control_kb(ticket_id)
     )
     
     await bot.send_message(
@@ -62,6 +90,19 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
         f"✅ Заявка #{ticket_id} взята в работу и установлена как активный чат. Ваши сообщения будут направлены этому клиенту. Используйте /my_tickets для переключения.",
         reply_markup=engineer_active_ticket_kb()
     )
+
+    # Отправляем фото шильдика станка, если оно было прикреплено клиентом
+    machine_media_id = ticket['machine_media_id'] if ticket else None
+    if machine_media_id:
+        try:
+            await bot.send_photo(
+                callback.from_user.id,
+                photo=machine_media_id,
+                caption="📷 Фото шильдика станка"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить фото шильдика инженеру {callback.from_user.id} для заявки #{ticket_id}: {e}")
+
     await callback.answer("Заявка взята в работу.")
 
 @router.callback_query(TicketCallback.filter(F.action == "complete"))
@@ -78,13 +119,13 @@ async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: Ti
 
     await db.close_ticket(ticket_id, status='completed', comment='Работы успешно завершены инженером')
 
-    await callback.message.edit_text(callback.message.html_text + "\n\n✅ <b>Статус: Заявка успешно завершена.</b>", parse_mode="HTML")
+    await callback.message.edit_text(callback.message.html_text + "\n\n✅ <b>Статус: Заявка успешно завершена.</b>")
     await callback.answer("Заявка закрыта как выполненная.")
 
     await bot.send_message(
         ticket['client_id'],
-        f"✅ Заявка #{ticket_id} успешно завершена специалистом. Спасибо за обращение!",
-        reply_markup=main_menu()
+        f"✅ Заявка #{ticket_id} успешно завершена специалистом. Спасибо за обращение!\n\nОцените, пожалуйста, качество обслуживания:",
+        reply_markup=rating_kb(ticket_id)
     )
 
     current_state_data = await state.get_data()
@@ -125,8 +166,8 @@ async def complete_current_ticket_via_menu(message: Message, bot: Bot, db: Datab
     # Notify client
     await bot.send_message(
         ticket['client_id'],
-        f"✅ Заявка #{active_ticket_id} успешно завершена специалистом. Спасибо за обращение!",
-        reply_markup=main_menu() # Return client to main menu
+        f"✅ Заявка #{active_ticket_id} успешно завершена специалистом. Спасибо за обращение!\n\nОцените, пожалуйста, качество обслуживания:",
+        reply_markup=rating_kb(active_ticket_id) # Return client to main menu
     )
 
     # Clear active ticket from engineer's state
@@ -198,7 +239,7 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
 
     await db.close_ticket(ticket_id, status='canceled', comment='Отменена инженером')
 
-    await callback.message.edit_text(callback.message.html_text + "\n\n🚫 <b>Статус: Заявка отменена.</b>", parse_mode="HTML")
+    await callback.message.edit_text(callback.message.html_text + "\n\n🚫 <b>Статус: Заявка отменена.</b>")
     await callback.answer("Заявка переведена в статус отмененных.")
 
     await bot.send_message(
@@ -214,3 +255,69 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
     remaining_tickets = await db.get_active_tickets_for_engineer(callback.from_user.id)
     if remaining_tickets:
         await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets))
+    else:
+        await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+
+
+async def _create_bitrix_task_for_ticket(db: Database, ticket):
+    """
+    Создаёт задачу в Битрикс24 для заявки, назначенной на инженера.
+
+    Назначается на пользователя Битрикс24, соответствующего инженеру (bitrix_user_id).
+    Если соответствие не задано или Битрикс24 не сконфигурирован — пропускает (логирует).
+    """
+    if not ticket:
+        return
+
+    engineer_id = ticket['engineer_id']
+    if not engineer_id:
+        logger.warning(f"Заявка #{ticket['id']} не имеет инженера — задача в Битрикс24 не создана.")
+        return
+
+    # Получаем ID пользователя Битрикс24 для инженера
+    bitrix_user_id = await db.get_bitrix_user_id(engineer_id)
+    if not bitrix_user_id:
+        logger.warning(
+            f"Для инженера {engineer_id} не задан bitrix_user_id "
+            f"(команда /set_bitrix) — задача в Битрикс24 не создана."
+        )
+        return
+
+    # Формируем заголовок и описание задачи
+    problem = str(ticket['problem'] or '—')
+    title = f"Заявка #{ticket['id']}: {problem[:80]}"
+
+    description_parts = [
+        f"<b>Заявка #{ticket['id']}</b>",
+        f"<b>Компания/Город:</b> {html.escape(str(ticket['company_city'] or '—'))}",
+        f"<b>Станок:</b> {html.escape(str(ticket['machine_info'] or '—'))}",
+        f"<b>Проблема:</b> {html.escape(problem)}",
+        f"<b>Контакты:</b> {html.escape(str(ticket['contact'] or '—'))}",
+        f"<b>Клиент:</b> {html.escape(str(ticket['client_name'] or '—'))}",
+    ]
+    description = "\n".join(description_parts)
+
+    # Загружаем файлы заявки в Битрикс24 и прикрепляем к задаче (если включено)
+    uf_files = []
+    if BITRIX_ATTACH_FILES == "1":
+        media_rows = await db.get_media_for_ticket(ticket['id'])
+        for media in media_rows:
+            file_path = media['file_path']
+            if not file_path:
+                continue
+            # file_path хранится как относительный путь (например, media/ticket_1/001_photo.jpg)
+            file_id = await upload_file_to_bitrix(file_path)
+            if file_id:
+                uf_files.append(file_id)
+
+    task_id = await create_task(
+        title=title,
+        description=description,
+        responsible_id=bitrix_user_id,
+        uf_files=uf_files or None,
+    )
+    if task_id:
+        logger.info(f"Для заявки #{ticket['id']} создана задача Битрикс24 #{task_id} (файлов: {len(uf_files)})")
+    else:
+        logger.error(f"Не удалось создать задачу Битрикс24 для заявки #{ticket['id']}")
+    return task_id
