@@ -1,14 +1,15 @@
-import logging
 import html
+import datetime
 from aiogram import Router, Bot, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboard
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramAPIError
 from bot.database import Database
 from bot.keyboards import (
     TicketCallback, engineer_select_client_kb, engineer_active_ticket_kb,
-    engineer_default_menu_kb, engineer_list_kb, engineer_detail_kb
+    engineer_default_menu_kb, engineer_list_kb, engineer_detail_kb,
+    engineer_redirect_kb
 )
 from bot.media import save_media_file
 router = Router()
@@ -77,6 +78,30 @@ def build_list_text(tickets, mode: str) -> str:
         lines.append(f"<b>Заявка #{t['id']}</b> — {html.escape(company)}: {html.escape(problem)}")
     lines.append("")
     lines.append("Выберите заявку для просмотра:")
+    return "\n".join(lines)
+
+def format_ticket_history(messages) -> str:
+    """Форматирует историю переписки по заявке для просмотра инженером."""
+    if not messages:
+        return "В этой заявке пока нет сообщений."
+
+    lines = ["<b>💬 История переписки</b>\n"]
+    for m in messages:
+        role_icon = "👤 Клиент" if m['sender_role'] == 'client' else "👨‍🔧 Инженер"
+        time_str = m['created_at'] or ''
+        # Форматируем время (обрезаем ISO до даты и времени)
+        try:
+            dt = datetime.datetime.fromisoformat(time_str)
+            time_str = dt.strftime("%d.%m %H:%M")
+        except Exception:
+            pass
+
+        text = m['text'] or ''
+        if m['media_type']:
+            media_label = f"📎 {m['media_type']}"
+            text = f"{text} [{media_label}]" if text else f"[{media_label}]"
+
+        lines.append(f"<b>{role_icon}</b> ({time_str}):\n{html.escape(text)}\n")
     return "\n".join(lines)
 
 async def show_ticket_list(msg, tickets, mode: str, db: Database, edit: bool = False):
@@ -237,8 +262,56 @@ async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, d
     await show_ticket_list(callback.message, tickets, mode, db, edit=True)
     await callback.answer()
 
+@router.callback_query(TicketCallback.filter(F.action == "redirect"))
+async def redirect_to_ticket(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):
+    """Переключает инженера на заявку, из которой пришло сообщение, для ответа."""
+    if not await _require_engineer(callback, is_engineer):
+        return
+    await state.update_data(active_ticket_id=callback_data.ticket_id)
+    await callback.message.answer(
+        f"🔁 Вы переключены на заявку #{callback_data.ticket_id}. "
+        f"Следующие сообщения будут отправлены клиенту этой заявки.",
+        reply_markup=engineer_active_ticket_kb()
+    )
+    await callback.answer()
+
 @router.callback_query(TicketCallback.filter(F.action == "noop"))
 async def noop(callback: CallbackQuery):
+    await callback.answer()
+
+@router.callback_query(TicketCallback.filter(F.action == "history"))
+async def show_ticket_history(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
+    if not await _require_engineer(callback, is_engineer):
+        return
+
+    ticket_id = callback_data.ticket_id
+    ticket = await db.get_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    messages = await db.get_messages_for_ticket(ticket_id)
+    history_text = format_ticket_history(messages)
+
+    # Возвращаемся к деталям заявки после просмотра истории
+    data = await state.get_data()
+    mode = data.get('ticket_view_mode', 'mine')
+    ids = data.get('ticket_view_ids') or []
+    index = data.get('ticket_view_index') or 0
+
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🔙 К заявке",
+                callback_data=TicketCallback(action="view", ticket_id=ticket_id).pack()
+            )
+        ]]
+    )
+
+    await callback.message.edit_text(
+        history_text,
+        reply_markup=back_kb
+    )
     await callback.answer()
 
 async def _send_relayed_message(
@@ -248,19 +321,20 @@ async def _send_relayed_message(
     method: str,
     file_id,
     prefix: str,
+    reply_markup=None,
 ):
     """Отправляет пересылаемое сообщение получателю (медиа/гео/контакт/текст)."""
     if method == 'send_location':
-        await safe_send(bot, target_id, method, latitude=file_id.latitude, longitude=file_id.longitude)
+        await safe_send(bot, target_id, method, latitude=file_id.latitude, longitude=file_id.longitude, reply_markup=reply_markup)
         return
     if method == 'send_contact':
-        await safe_send(bot, target_id, method, phone_number=file_id.phone_number, first_name=file_id.first_name or '')
+        await safe_send(bot, target_id, method, phone_number=file_id.phone_number, first_name=file_id.first_name or '', reply_markup=reply_markup)
         return
     if file_id:
         caption = f"<b>{prefix}</b>{html.escape(message.caption or '')}"
-        await safe_send(bot, target_id, method, **{method.replace('send_', ''): file_id, 'caption': caption})
+        await safe_send(bot, target_id, method, **{method.replace('send_', ''): file_id, 'caption': caption, 'reply_markup': reply_markup})
     elif message.text:
-        await safe_send(bot, target_id, "send_message", text=f"<b>{prefix}</b>{html.escape(message.text)}")
+        await safe_send(bot, target_id, "send_message", text=f"<b>{prefix}</b>{html.escape(message.text)}", reply_markup=reply_markup)
 
 @router.message()
 async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: bool, state: FSMContext):
@@ -321,7 +395,9 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
                     sender_role='client'
                 )
 
-        await _send_relayed_message(bot, eng_id, message, method, file_id, prefix)
+        # Кнопка для быстрого переключения инженера на эту заявку для ответа
+        redirect_kb = engineer_redirect_kb(ticket['id'])
+        await _send_relayed_message(bot, eng_id, message, method, file_id, prefix, reply_markup=redirect_kb)
         return
 
     # 2. Logic for Engineer -> Client

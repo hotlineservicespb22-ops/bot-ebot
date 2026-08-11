@@ -207,3 +207,53 @@ async def test_engineer_stats(db):
     # Без инженеров статистика пуста или не падает
     stats = await db.get_engineer_stats()
     assert isinstance(stats, list)
+
+
+@pytest.mark.asyncio
+async def test_open_tickets_visible_regardless_of_duty_status(db):
+    """Нераспределенные заявки видны всем, независимо от статуса дежурного инженера."""
+    # Создаем две нераспределенные заявки (status='open', engineer_id IS NULL)
+    await db.create_ticket(
+        client_id=1,
+        client_name="Клиент 1",
+        company="",
+        equipment_type="",
+        brand="",
+        cnc_model="",
+        problem="Проблема 1",
+        media_id=None,
+        city="",
+        inn_contract="",
+        contact="12345"
+    )
+    await db.create_ticket(
+        client_id=2,
+        client_name="Клиент 2",
+        company="",
+        equipment_type="",
+        brand="",
+        cnc_model="",
+        problem="Проблема 2",
+        media_id=None,
+        city="",
+        inn_contract="",
+        contact="67890"
+    )
+
+    # Добавляем инженера и выключаем его (вчера был выключен)
+    await db.add_engineer(999, "Инженер Тест")
+    await db.set_engineer_active(999, 0)
+
+    # Нераспределенные заявки доступны независимо от статуса дежурного
+    open_tickets = await db.get_open_tickets()
+    assert len(open_tickets) == 2
+
+    # Включаем инженера сегодня
+    await db.set_engineer_active(999, 1)
+    assert await db.is_engineer(999) is True
+
+    # Инженер видит все нераспределенные заявки
+    open_tickets_after = await db.get_open_tickets()
+    assert len(open_tickets_after) == 2
+    assert all(t['engineer_id'] is None for t in open_tickets_after)
+    assert all(t['status'] == 'open' for t in open_tickets_after)

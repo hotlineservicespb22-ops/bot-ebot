@@ -119,6 +119,17 @@ def engineer_select_client_kb(tickets):
         ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+def engineer_redirect_kb(ticket_id: int):
+    """Inline-кнопка под сообщением клиента для переключения инженера на эту заявку."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"🔁 Ответить на заявку #{ticket_id}",
+                callback_data=TicketCallback(action="redirect", ticket_id=ticket_id).pack()
+            )
+        ]]
+    )
+
 def engineer_list_kb(tickets, mode: str):
     """Inline keyboard to list tickets with 'view' action for details/navigation."""
     keyboard = []
@@ -149,6 +160,14 @@ def engineer_detail_kb(ticket_id: int, mode: str, index: int, total: int):
                 InlineKeyboardButton(text="▶️", callback_data=TicketCallback(action="next", ticket_id=ticket_id).pack())
             )
         buttons.append(nav_buttons)
+
+    # Кнопка истории переписки (доступна в любом режиме)
+    buttons.append([
+        InlineKeyboardButton(
+            text="💬 История переписки",
+            callback_data=TicketCallback(action="history", ticket_id=ticket_id).pack()
+        )
+    ])
 
     # Кнопки управления в зависимости от режима
     if mode == "mine":
