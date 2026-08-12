@@ -75,6 +75,7 @@ async def cancel_ticket_by_client(message: Message, bot: Bot, db: Database):
 @router.callback_query(RatingCallback.filter())
 async def process_rating(callback: CallbackQuery, callback_data: RatingCallback, db: Database, state: FSMContext):
     """Обрабатывает выбор оценки заявки клиентом."""
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     # Проверяем, что оценку ставит клиент этой заявки
     ticket = await db.get_ticket(callback_data.ticket_id)
     if not ticket:
@@ -97,7 +98,6 @@ async def process_rating(callback: CallbackQuery, callback_data: RatingCallback,
     # Устанавливаем FSM-состояние для приёма комментария
     await state.set_state(TicketForm.rating_comment)
     await state.update_data(rating_ticket_id=callback_data.ticket_id)
-    await callback.answer("Оценка сохранена!")
 
 @router.message(StateFilter(TicketForm.rating_comment))
 async def save_rating_comment(message: Message, state: FSMContext, db: Database):

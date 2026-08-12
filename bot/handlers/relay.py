@@ -131,6 +131,7 @@ async def _require_engineer(callback: CallbackQuery, is_engineer: bool) -> bool:
 async def select_ticket_for_reply(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     # Сбрасываем возможное FSM-состояние выбора клиента
     await state.clear()
     await state.update_data(active_ticket_id=callback_data.ticket_id)
@@ -139,7 +140,6 @@ async def select_ticket_for_reply(callback: CallbackQuery, callback_data: Ticket
         f"✅ Выбран чат по заявке #{callback_data.ticket_id}. Ваши следующие сообщения будут отправлены этому клиенту.",
         reply_markup=engineer_active_ticket_kb()
     )
-    await callback.answer()
 
 @router.message(Command("my_tickets"))
 @router.message(F.text == "📋 Мои заявки в работе")
@@ -182,6 +182,7 @@ async def list_open_tickets(message: Message, db: Database, is_engineer: bool, s
 async def view_ticket(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     data = await state.get_data()
     mode = data.get('ticket_view_mode', 'mine')
     ids = data.get('ticket_view_ids') or []
@@ -208,13 +209,13 @@ async def view_ticket(callback: CallbackQuery, callback_data: TicketCallback, db
         format_ticket_detail(ticket),
         reply_markup=engineer_detail_kb(callback_data.ticket_id, mode, index, len(ids))
     )
-    await callback.answer()
 
 @router.callback_query(TicketCallback.filter(F.action == "prev"))
 @router.callback_query(TicketCallback.filter(F.action == "next"))
 async def navigate_ticket(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     data = await state.get_data()
     mode = data.get('ticket_view_mode', 'mine')
     ids = data.get('ticket_view_ids') or []
@@ -241,19 +242,18 @@ async def navigate_ticket(callback: CallbackQuery, callback_data: TicketCallback
         format_ticket_detail(ticket),
         reply_markup=engineer_detail_kb(ticket_id, mode, index, len(ids))
     )
-    await callback.answer()
 
 @router.callback_query(TicketCallback.filter(F.action == "back_to_list"))
 async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     data = await state.get_data()
     mode = data.get('ticket_view_mode', 'mine')
 
     tickets = await get_ticket_list_data(db, callback.from_user.id, mode)
     if not tickets:
         await callback.message.edit_text("Список пуст.")
-        await callback.answer()
         return
 
     # Обновляем сохранённый список (мог измениться)
@@ -261,20 +261,19 @@ async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, d
     await state.update_data(ticket_view_ids=ids)
 
     await show_ticket_list(callback.message, tickets, mode, db, edit=True)
-    await callback.answer()
 
 @router.callback_query(TicketCallback.filter(F.action == "redirect"))
 async def redirect_to_ticket(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):
     """Переключает инженера на заявку, из которой пришло сообщение, для ответа."""
     if not await _require_engineer(callback, is_engineer):
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     await state.update_data(active_ticket_id=callback_data.ticket_id)
     await callback.message.answer(
         f"🔁 Вы переключены на заявку #{callback_data.ticket_id}. "
         f"Следующие сообщения будут отправлены клиенту этой заявки.",
         reply_markup=engineer_active_ticket_kb()
     )
-    await callback.answer()
 
 @router.callback_query(TicketCallback.filter(F.action == "noop"))
 async def noop(callback: CallbackQuery):
@@ -284,6 +283,7 @@ async def noop(callback: CallbackQuery):
 async def show_ticket_history(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
 
     ticket_id = callback_data.ticket_id
     ticket = await db.get_ticket(ticket_id)
@@ -313,7 +313,6 @@ async def show_ticket_history(callback: CallbackQuery, callback_data: TicketCall
         history_text,
         reply_markup=back_kb
     )
-    await callback.answer()
 
 async def _send_relayed_message(
     bot: Bot,

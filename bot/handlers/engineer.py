@@ -18,10 +18,11 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
     if not is_engineer:
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
-        
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
+
     ticket_id = callback_data.ticket_id
     eng_id = callback.from_user.id
-    
+
     success = await db.take_ticket(ticket_id, eng_id)
     if not success:
         await callback.answer("Заявка уже занята другим специалистом или закрыта.", show_alert=True)
@@ -149,13 +150,12 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
         except Exception as e:
             logger.error(f"Не удалось отправить фото шильдика инженеру {callback.from_user.id} для заявки #{ticket_id}: {e}")
 
-    await callback.answer("Заявка взята в работу.")
-
 @router.callback_query(TicketCallback.filter(F.action == "complete"))
 async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, state: FSMContext, is_engineer: bool):
     if not is_engineer:
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
 
     ticket_id = callback_data.ticket_id
     ticket = await db.get_ticket(ticket_id)
@@ -176,7 +176,6 @@ async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: Ti
             await callback.message.edit_text(callback.message.html_text + completed_suffix)
     except Exception as e:
         logger.warning(f"Не удалось обновить сообщение о завершении заявки #{ticket_id}: {e}")
-    await callback.answer("Заявка закрыта как выполненная.")
 
     try:
         await bot.send_message(
@@ -295,6 +294,7 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
     if not is_engineer:
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
 
     ticket_id = callback_data.ticket_id
     ticket = await db.get_ticket(ticket_id)
@@ -315,7 +315,6 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
             await callback.message.edit_text(callback.message.html_text + canceled_suffix)
     except Exception as e:
         logger.warning(f"Не удалось обновить сообщение об отмене заявки #{ticket_id}: {e}")
-    await callback.answer("Заявка переведена в статус отмененных.")
 
     try:
         await bot.send_message(

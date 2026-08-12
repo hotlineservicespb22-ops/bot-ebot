@@ -35,22 +35,19 @@ async def admin_panel_callback(callback: CallbackQuery, callback_data: AdminCall
         await callback.answer("🚫 Нет доступа.", show_alert=True)
         return
 
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
+
     action = callback_data.action
     if action == "stats":
         await cmd_stats(callback.message, db, is_admin, edit=True)
-        await callback.answer()
     elif action == "export":
         await cmd_export_tickets(callback.message, db, bot, is_admin, edit=True)
-        await callback.answer()
     elif action == "list_eng":
         await cmd_list_engineers(callback.message, db, is_admin, edit=True)
-        await callback.answer()
     elif action == "list_admin":
         await cmd_list_admin(callback.message, db, is_admin, edit=True)
-        await callback.answer()
     elif action == "duty_manage":
         await show_duty_management(callback.message, db, edit=True)
-        await callback.answer()
     elif action == "duty_on":
         await db.set_engineer_active(callback_data.engineer_id, 1)
         await callback.answer("✅ Инженер включён в дежурные.")
@@ -61,7 +58,6 @@ async def admin_panel_callback(callback: CallbackQuery, callback_data: AdminCall
         await show_duty_management(callback.message, db, edit=True)
     elif action == "back":
         await callback.message.edit_text("🛠 <b>Админ-панель</b>\n\nВыберите действие:", reply_markup=admin_menu_kb())
-        await callback.answer()
 
 # ===================== Управление администраторами =====================
 
