@@ -113,7 +113,7 @@ def engineer_select_client_kb(tickets):
     for ticket in tickets:
         keyboard.append([
             InlineKeyboardButton(
-                text=f"🎫 Заявка #{ticket['id']} ({ticket['company']})",
+                text=f"🎫 Заявка #{ticket['id']} ({ticket['company_city'] or '—'})",
                 callback_data=TicketCallback(action="select", ticket_id=ticket['id']).pack()
             )
         ])
@@ -136,7 +136,7 @@ def engineer_list_kb(tickets, mode: str):
     for ticket in tickets:
         keyboard.append([
             InlineKeyboardButton(
-                text=f"🎫 Заявка #{ticket['id']} ({ticket['company'] or '—'})",
+                text=f"🎫 Заявка #{ticket['id']} ({ticket['company_city'] or '—'})",
                 callback_data=TicketCallback(action="view", ticket_id=ticket['id']).pack()
             )
         ])

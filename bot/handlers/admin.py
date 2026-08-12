@@ -66,7 +66,7 @@ async def admin_panel_callback(callback: CallbackQuery, callback_data: AdminCall
 # ===================== Управление администраторами =====================
 
 @router.message(Command("add_admin"))
-async def cmd_add_admin(message: Message, db: Database, is_admin: bool):
+async def cmd_add_admin(message: Message, db: Database):
     """Добавляет пользователя в список администраторов (через БД). Доступно только администраторам."""
     # Явная проверка прав через БД — не полагаемся только на middleware
     is_admin = await db.is_admin(message.from_user.id)
@@ -89,7 +89,7 @@ async def cmd_add_admin(message: Message, db: Database, is_admin: bool):
     await message.answer(f"✅ Пользователь <code>{admin_id}</code> добавлен в администраторы.")
 
 @router.message(Command("del_admin"))
-async def cmd_del_admin(message: Message, db: Database, is_admin: bool):
+async def cmd_del_admin(message: Message, db: Database):
     """Удаляет пользователя из списка администраторов (через БД). Доступно только администраторам."""
     # Явная проверка прав через БД — не полагаемся только на middleware
     is_admin = await db.is_admin(message.from_user.id)
@@ -269,9 +269,10 @@ async def cmd_bulk_add_engineers(message: Message, db: Database, is_admin: bool)
         )
         return
 
-    # Разделяем по запятой или новой строке
+    # Разделяем по новой строке, точке с запятой, или по запятой, за которой следует цифра (ID).
+    # Это позволяет именам содержать запятые (например, "Иванов, Иван").
     import re
-    entries = re.split(r'[,\n;]+', text)
+    entries = re.split(r'[;\n]+|,\s*(?=\d)', text)
     added = []
     errors = []
 
@@ -363,7 +364,8 @@ async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin:
         status_msg = await message.answer("Готовлю отчет...")
     
     # Поддержка периода: /export ГГГГ-ММ-ДД ГГГГ-ММ-ДД
-    args = message.text.split()
+    # В edit-режиме (callback) message.text может быть None — тогда экспортируем все заявки
+    args = (message.text or '').split()
     tickets = None
     filename = "tickets_report.csv"
     if len(args) == 3:

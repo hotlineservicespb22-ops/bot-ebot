@@ -363,12 +363,24 @@ class Database:
 
     # Ratings CRUD
     async def save_rating(self, ticket_id: int, client_id: int, rating: int, comment: str = None):
-        """Сохраняет оценку клиента по завершённой заявке."""
+        """Сохраняет оценку клиента по завершённой заявке.
+
+        Используется INSERT OR IGNORE, чтобы повторная оценка не перезаписывала предыдущую.
+        """
         async with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
             await self.conn.execute(
-                "INSERT OR REPLACE INTO ratings (ticket_id, client_id, rating, comment, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO ratings (ticket_id, client_id, rating, comment, created_at) VALUES (?, ?, ?, ?, ?)",
                 (ticket_id, client_id, rating, comment, now)
+            )
+            await self.conn.commit()
+
+    async def update_rating_comment(self, ticket_id: int, comment: str):
+        """Обновляет комментарий к оценке заявки."""
+        async with self.lock:
+            await self.conn.execute(
+                "UPDATE ratings SET comment = ? WHERE ticket_id = ?",
+                (comment, ticket_id)
             )
             await self.conn.commit()
 
@@ -433,7 +445,7 @@ class Database:
                     e.user_id,
                     e.name,
                     SUM(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) as active_count,
-                    SUM(CASE WHEN t.status IN ('completed', 'canceled') AND t.engineer_id = e.user_id THEN 1 ELSE 0 END) as closed_count
+                    SUM(CASE WHEN t.status IN ('completed', 'canceled') THEN 1 ELSE 0 END) as closed_count
                 FROM
                     engineers e
                 LEFT JOIN

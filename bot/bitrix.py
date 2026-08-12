@@ -24,6 +24,9 @@ from bot.config import (
 
 logger = logging.getLogger(__name__)
 
+# Кэш ID папки диска Битрикс24 (чтобы не делать сетевые запросы при каждой загрузке файла)
+_disk_folder_id_cache: Optional[int] = None
+
 
 def _make_deadline() -> Optional[str]:
     """Возвращает дедлайн в формате ISO 8601, если он задан в конфигурации."""
@@ -42,11 +45,17 @@ async def _get_disk_folder_id() -> Optional[int]:
     """
     Возвращает ID папки на диске Битрикс24 для загрузки файлов.
 
+    Результат кэшируется, чтобы не выполнять сетевые запросы при каждой загрузке файла.
+
     Логика:
     1. Если BITRIX_DISK_FOLDER_ID задан — пробуем использовать его как ID папки.
     2. Если это ID хранилища (а не папки) — резолвим ROOT_OBJECT_ID хранилища.
     3. Иначе пытаемся получить общий диск (Common disk).
     """
+    global _disk_folder_id_cache
+    if _disk_folder_id_cache is not None:
+        return _disk_folder_id_cache
+
     if not BITRIX_WEBHOOK_URL:
         return None
 
@@ -66,7 +75,8 @@ async def _get_disk_folder_id() -> Optional[int]:
                         data = await resp.json()
                 if "error" not in data:
                     logger.info(f"BITRIX_DISK_FOLDER_ID={candidate} — это ID папки.")
-                    return candidate
+                    _disk_folder_id_cache = candidate
+                    return _disk_folder_id_cache
             except Exception as e:
                 logger.warning(f"Не удалось проверить BITRIX_DISK_FOLDER_ID={candidate} как папку: {e}")
 
@@ -83,7 +93,8 @@ async def _get_disk_folder_id() -> Optional[int]:
                         f"BITRIX_DISK_FOLDER_ID={candidate} — это ID хранилища "
                         f"'{storage.get('NAME', '')}', ROOT_OBJECT_ID={root_id}."
                     )
-                    return int(root_id)
+                    _disk_folder_id_cache = int(root_id)
+                    return _disk_folder_id_cache
             except Exception as e:
                 logger.warning(f"Не удалось проверить BITRIX_DISK_FOLDER_ID={candidate} как хранилище: {e}")
 
@@ -99,7 +110,8 @@ async def _get_disk_folder_id() -> Optional[int]:
             folder_id = storages[0].get("ROOT_OBJECT_ID")
             if folder_id:
                 logger.info(f"Получен ID общего диска Битрикс24: {folder_id}")
-                return int(folder_id)
+                _disk_folder_id_cache = int(folder_id)
+                return _disk_folder_id_cache
     except Exception as e:
         logger.error(f"Не удалось получить общий диск Битрикс24: {e}")
 
@@ -136,13 +148,12 @@ async def upload_file_to_bitrix(file_path: str, filename: Optional[str] = None) 
         async with ClientSession() as session:
             async with session.post(url, json={"id": folder_id, "filename": fname}, timeout=15) as resp:
                 data = await resp.json()
-
-        if not resp.ok:
-            logger.error(f"Ошибка HTTP {resp.status} при получении uploadUrl: {data}")
-            return None
-        if "error" in data:
-            logger.error(f"Ошибка Битрикс24 при получении uploadUrl: {data}")
-            return None
+                if not resp.ok:
+                    logger.error(f"Ошибка HTTP {resp.status} при получении uploadUrl: {data}")
+                    return None
+                if "error" in data:
+                    logger.error(f"Ошибка Битрикс24 при получении uploadUrl: {data}")
+                    return None
 
         result = data.get("result", {})
         upload_url = result.get("uploadUrl")
@@ -166,13 +177,12 @@ async def upload_file_to_bitrix(file_path: str, filename: Optional[str] = None) 
             async with ClientSession() as session:
                 async with session.post(upload_url, data=form, timeout=30) as resp:
                     data = await resp.json()
-
-        if not resp.ok:
-            logger.error(f"Ошибка HTTP {resp.status} при загрузке файла в Битрикс24: {data}")
-            return None
-        if "error" in data:
-            logger.error(f"Ошибка Битрикс24 при загрузке файла: {data}")
-            return None
+                    if not resp.ok:
+                        logger.error(f"Ошибка HTTP {resp.status} при загрузке файла в Битрикс24: {data}")
+                        return None
+                    if "error" in data:
+                        logger.error(f"Ошибка Битрикс24 при загрузке файла: {data}")
+                        return None
 
         file_id = data.get("result", {}).get("ID")
         if file_id is None:
@@ -287,9 +297,8 @@ async def create_task(
     # Преобразуем HTML в BBCode для корректного отображения жирного текста в Битрикс24
     description = description.replace('<b>', '[B]').replace('</b>', '[/B]')
 
-    # Постановщик задачи: аргумент > жёстко заданный ID 414 (по требованию заказчика)
-    # Всегда ставим постановщиком пользователя с ID 414, если не передан явный created_by.
-    task_created_by = created_by or 414
+    # Постановщик задачи: аргумент > конфигурация (BITRIX_CREATED_BY) > жёстко заданный ID 414
+    task_created_by = created_by or BITRIX_CREATED_BY or 414
 
     fields = {
         "TITLE": title,

@@ -130,9 +130,19 @@ async def main():
         signature is `(event: ErrorEvent)`, with the exception in `event.exception`.
         """
         logger.error(f"Критическая ошибка: {event.exception}", exc_info=True)
-        if ADMIN_IDS:
+        # Собираем админов из .env и из БД
+        admin_ids = set(ADMIN_IDS)
+        try:
+            db_admins = await db.get_admins()
+            admin_ids.update(row['user_id'] for row in db_admins)
+        except Exception as e:
+            logger.warning(f"Не удалось получить админов из БД для уведомления об ошибке: {e}")
+
+        if admin_ids:
             try:
-                tb_formatted = traceback.format_exc()
+                # Используем traceback из самого исключения (в aiogram 3 format_exc() может быть пустым)
+                tb_lines = traceback.format_exception(type(event.exception), event.exception, event.exception.__traceback__)
+                tb_formatted = "".join(tb_lines)
                 # Обрезаем traceback, чтобы не превысить лимит Telegram (4096 символов)
                 if len(tb_formatted) > 3000:
                     tb_formatted = tb_formatted[-3000:]
@@ -146,7 +156,7 @@ async def main():
                 # Обрезаем итоговое сообщение до безопасной длины (4000 символов)
                 if len(error_message) > 4000:
                     error_message = error_message[:4000] + "\n...(обрезано)"
-                for admin_id in ADMIN_IDS:
+                for admin_id in admin_ids:
                     await bot.send_message(admin_id, error_message)
             except Exception as e:
                 logger.error(f"Не удалось уведомить администраторов об ошибке: {e}")
@@ -193,6 +203,7 @@ async def main():
         timeout_task.cancel()
         if WEBHOOK_URL:
             await bot.delete_webhook()
+        await shutdown()
         await db.close()
         await bot.session.close()
 
@@ -213,7 +224,15 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
                     f"📝 <b>Проблема:</b> {html.escape(str(ticket['problem'] or '—'))}\n"
                     f"📞 <b>Контакты:</b> {html.escape(str(ticket['contact'] or '—'))}"
                 )
-                for admin_id in ADMIN_IDS:
+                # Уведомляем админов из .env и из БД
+                admin_ids = set(ADMIN_IDS)
+                try:
+                    db_admins = await db.get_admins()
+                    admin_ids.update(row['user_id'] for row in db_admins)
+                except Exception as e:
+                    logger.warning(f"Не удалось получить админов из БД для уведомления о просроченной заявке: {e}")
+
+                for admin_id in admin_ids:
                     try:
                         await bot.send_message(admin_id, log_msg)
                     except Exception as e:

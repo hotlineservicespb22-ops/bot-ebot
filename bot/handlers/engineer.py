@@ -114,17 +114,20 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
     except Exception as e:
         logger.warning(f"Не удалось обновить сообщение о взятии заявки #{ticket_id}: {e}")
 
-    try:
-        await bot.send_message(
-            ticket['client_id'],
-            (
-                f"👨‍🔧 К вашей заявке #{ticket_id} подключился дежурный инженер.\n"
-                "Вы можете писать уточнения и присылать фотографии прямо в этот чат."
-            ),
-            reply_markup=active_ticket_menu_kb()
-        )
-    except Exception as e:
-        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о взятии заявки #{ticket_id}: {e}")
+    if ticket and ticket['client_id']:
+        try:
+            await bot.send_message(
+                ticket['client_id'],
+                (
+                    f"👨‍🔧 К вашей заявке #{ticket_id} подключился дежурный инженер.\n"
+                    "Вы можете писать уточнения и присылать фотографии прямо в этот чат."
+                ),
+                reply_markup=active_ticket_menu_kb()
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о взятии заявки #{ticket_id}: {e}")
+    else:
+        logger.warning(f"Заявка #{ticket_id} не имеет client_id — клиент не уведомлён о взятии заявки.")
 
     try:
         await callback.message.answer(

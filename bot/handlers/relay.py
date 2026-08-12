@@ -326,9 +326,15 @@ async def _send_relayed_message(
 ):
     """Отправляет пересылаемое сообщение получателю (медиа/гео/контакт/текст)."""
     if method == 'send_location':
+        # Сначала отправляем префикс с именем отправителя, затем геолокацию
+        if prefix:
+            await safe_send(bot, target_id, "send_message", text=f"<b>{prefix}</b>")
         await safe_send(bot, target_id, method, latitude=file_id.latitude, longitude=file_id.longitude, reply_markup=reply_markup)
         return
     if method == 'send_contact':
+        # Сначала отправляем префикс с именем отправителя, затем контакт
+        if prefix:
+            await safe_send(bot, target_id, "send_message", text=f"<b>{prefix}</b>")
         await safe_send(bot, target_id, method, phone_number=file_id.phone_number, first_name=file_id.first_name or '', reply_markup=reply_markup)
         return
     if file_id:
@@ -346,6 +352,15 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
     if ticket:
         eng_id = ticket['engineer_id']
         if not eng_id:  # Заявка ещё не взята инженером (status = 'open')
+            # Сохраняем сообщение клиента в историю, чтобы оно не потерялось до назначения инженера
+            method, file_id, file_size = get_file_id_and_size(message)
+            await db.save_message(
+                ticket_id=ticket['id'],
+                sender_id=user_id,
+                sender_role='client',
+                text=message.text or message.caption or '',
+                media_type=file_id and method.replace('send_', '') or None
+            )
             await message.answer(
                 "⏳ Ваша заявка ещё ожидает назначения дежурного инженера. "
                 "Как только инженер подключится, ваши сообщения будут ему переданы."

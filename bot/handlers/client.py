@@ -18,6 +18,7 @@ class TicketForm(StatesGroup):
     machine_info = State()    # Шаг 2: фото шильдика или бренд/модель
     company_city = State()    # Шаг 3: город + ИНН/название компании
     contact = State()         # Шаг 4: контакт через request_contact
+    rating_comment = State()  # Комментарий после оценки заявки
 
 async def delete_last_bot_message(bot: Bot, message: Message, state: FSMContext):
     """UX-очистка: удаляет предыдущее сообщение бота (вопрос) из чата."""
@@ -93,7 +94,27 @@ async def process_rating(callback: CallbackQuery, callback_data: RatingCallback,
         f"⭐ Спасибо за оценку <b>{callback_data.value}/5</b>!\n\n"
         "Если хотите, можете оставить комментарий текстом, или нажмите /cancel чтобы завершить."
     )
+    # Устанавливаем FSM-состояние для приёма комментария
+    await state.set_state(TicketForm.rating_comment)
+    await state.update_data(rating_ticket_id=callback_data.ticket_id)
     await callback.answer("Оценка сохранена!")
+
+@router.message(StateFilter(TicketForm.rating_comment))
+async def save_rating_comment(message: Message, state: FSMContext, db: Database):
+    """Сохраняет комментарий клиента после оценки заявки."""
+    data = await state.get_data()
+    ticket_id = data.get('rating_ticket_id')
+    if not ticket_id:
+        await state.clear()
+        await message.answer("Комментарий не сохранён. Спасибо за обращение!", reply_markup=main_menu())
+        return
+
+    comment = message.text or message.caption or ''
+    if comment.strip():
+        await db.update_rating_comment(ticket_id=ticket_id, comment=comment.strip())
+
+    await state.clear()
+    await message.answer("✅ Спасибо за ваш комментарий!", reply_markup=main_menu())
 
 @router.message(Command("cancel"))
 @router.message(F.text == "❌ Отмена")
@@ -318,7 +339,7 @@ async def ticket_contact(message: Message, state: FSMContext, bot: Bot, db: Data
     ticket_id = await db.create_ticket(
         client_id=message.from_user.id,
         client_name=message.from_user.full_name,
-        company=data.get('company_city', ''),
+        company='',
         equipment_type='',
         brand='',
         cnc_model='',
