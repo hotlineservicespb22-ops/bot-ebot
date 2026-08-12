@@ -8,6 +8,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # Databases
 *.db
@@ -32,3 +36,6 @@ Thumbs.db
 
 # Media files (фото/видео заявок)
 media/
+
+# Внутренняя база знаний (PDF)
+*.pdf

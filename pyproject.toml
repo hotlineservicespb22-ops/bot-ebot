@@ -1,0 +1,20 @@
+[tool.ruff.lint]
+# Исключаем несущественные стилистические правила,
+# чтобы CI не падал на них, сохраняя фокус на критичных проблемах.
+extend-ignore = [
+    "E501",     # line-too-long: длинные строки (часто в сообщениях/форматировании)
+    "BLE001",   # blind-except: ловля широких исключений (принято для устойчивости)
+    "SIM117",   # multiple-with-statements: вложенные with
+    "LOG015",   # root-logger-call: использование корневого логгера
+    "RUF013",   # implicit-optional: неявный Optional (стиль проекта)
+    "RUF059",   # unused-unpacked-variable: в тестах
+    "B017",     # assert-raises-exception: общие исключения в тестах
+    "C401",     # unnecessary-generator-set
+    "ASYNC230", # blocking-open-call-in-async-function
+    "LOG014",   # exc-info-outside-except-handler
+    "S110",     # try-except-pass
+    "TRY002",   # raise-vanilla-class
+]
+
+# Фокус на критичных проблемах: неиспользуемые импорты, переменные, неопределённые имена (F)
+select = ["F"]

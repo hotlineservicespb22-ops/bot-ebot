@@ -1,18 +1,34 @@
 import asyncio
+import html
 import logging
+import traceback
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramConflictError
-from aiogram.types import ErrorEvent, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
-import traceback
-import html
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    ErrorEvent,
+)
 
-from bot.config import BOT_TOKEN, DB_PATH, ADMIN_IDS, TICKET_TIMEOUT, REDIS_URL, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_HOST, WEBHOOK_PORT
+from bot.config import (
+    ADMIN_IDS,
+    BOT_TOKEN,
+    DB_PATH,
+    REDIS_URL,
+    TICKET_TIMEOUT,
+    WEBHOOK_HOST,
+    WEBHOOK_PATH,
+    WEBHOOK_PORT,
+    WEBHOOK_URL,
+)
 from bot.database import Database
+from bot.handlers import admin, client, engineer, relay
 from bot.middlewares import DbSessionMiddleware, RoleMiddleware, ThrottlingMiddleware
-from bot.handlers import client, engineer, admin, relay
 
 # Настройка логирования для отладки
 logging.basicConfig(
@@ -25,6 +41,7 @@ logging.getLogger('aiogram.event').setLevel(logging.DEBUG)
 
 # Логирование в файл с ротацией
 from logging.handlers import RotatingFileHandler
+
 file_handler = RotatingFileHandler(
     "bot.log",
     maxBytes=5 * 1024 * 1024,  # 5 MB
@@ -55,6 +72,7 @@ DEFAULT_COMMANDS = [
     BotCommand(command="start", description="🔄 Запустить бота"),
     BotCommand(command="help", description="❓ Помощь"),
     BotCommand(command="my_requests", description="📋 Мои заявки"),
+    BotCommand(command="my_tickets", description="📋 Мои заявки в работе"),
     BotCommand(command="cancel", description="❌ Отменить действие"),
 ]
 
@@ -71,8 +89,21 @@ ADMIN_COMMANDS = [
     BotCommand(command="list_eng", description="👥 Список инженеров"),
     BotCommand(command="bulk_add_eng", description="📦 Массовое добавление инженеров"),
     BotCommand(command="set_bitrix", description="🔗 Привязка к Битрикс24"),
-    BotCommand(command="my_tickets", description="📋 Мои заявки в работе"),
 ]
+
+async def get_all_admin_ids(db: Database) -> set:
+    """
+    Возвращает множество ID администраторов: из .env (ADMIN_IDS) и из БД.
+    Ошибки БД не критичны — возвращаем хотя бы ADMIN_IDS из конфигурации.
+    """
+    admin_ids = set(ADMIN_IDS)
+    try:
+        db_admins = await db.get_admins()
+        admin_ids.update(row['user_id'] for row in db_admins)
+    except Exception as e:
+        logger.warning(f"Не удалось получить админов из БД: {e}")
+    return admin_ids
+
 
 async def setup_commands(bot: Bot, db: Database):
     """Устанавливает меню команд для всех пользователей и отдельно для админов."""
@@ -105,6 +136,42 @@ async def setup_commands(bot: Bot, db: Database):
 
     logger.info("Меню команд установлено (общие + админские).")
 
+
+async def error_handler(event: ErrorEvent, bot: Bot, db: Database):
+    """
+    Global error handler. Catches all exceptions.
+    The error `TypeError: ... missing 1 required positional argument: 'exception'`
+    from your logs indicates an old handler signature was used. The correct aiogram 3
+    signature is `(event: ErrorEvent)`, with the exception in `event.exception`.
+    """
+    logger.error(f"Критическая ошибка: {event.exception}", exc_info=True)
+    # Собираем админов из .env и из БД
+    admin_ids = await get_all_admin_ids(db)
+
+    if admin_ids:
+        try:
+            # Используем traceback из самого исключения (в aiogram 3 format_exc() может быть пустым)
+            tb_lines = traceback.format_exception(type(event.exception), event.exception, event.exception.__traceback__)
+            tb_formatted = "".join(tb_lines)
+            # Обрезаем traceback, чтобы не превысить лимит Telegram (4096 символов)
+            if len(tb_formatted) > 3000:
+                tb_formatted = tb_formatted[-3000:]
+            # Using HTML for safe formatting.
+            error_message = (
+                f"<b>❌ Критическая ошибка</b>\n\n"
+                f"<b>Тип:</b> <code>{html.escape(type(event.exception).__name__)}</code>\n"
+                f"<b>Ошибка:</b> <code>{html.escape(str(event.exception))}</code>\n\n"
+                f"<b>Traceback:</b>\n<pre>{html.escape(tb_formatted)}</pre>"
+            )
+            # Обрезаем итоговое сообщение до безопасной длины (4000 символов)
+            if len(error_message) > 4000:
+                error_message = error_message[:4000] + "\n...(обрезано)"
+            for admin_id in admin_ids:
+                await bot.send_message(admin_id, error_message)
+        except Exception as e:
+            logger.error(f"Не удалось уведомить администраторов об ошибке: {e}")
+
+
 async def main():
     # Database initialization
     db = Database(DB_PATH)
@@ -122,44 +189,8 @@ async def main():
 
     # Error handler
     @dp.error()
-    async def error_handler(event: ErrorEvent, bot: Bot):
-        """
-        Global error handler. Catches all exceptions.
-        The error `TypeError: ... missing 1 required positional argument: 'exception'`
-        from your logs indicates an old handler signature was used. The correct aiogram 3
-        signature is `(event: ErrorEvent)`, with the exception in `event.exception`.
-        """
-        logger.error(f"Критическая ошибка: {event.exception}", exc_info=True)
-        # Собираем админов из .env и из БД
-        admin_ids = set(ADMIN_IDS)
-        try:
-            db_admins = await db.get_admins()
-            admin_ids.update(row['user_id'] for row in db_admins)
-        except Exception as e:
-            logger.warning(f"Не удалось получить админов из БД для уведомления об ошибке: {e}")
-
-        if admin_ids:
-            try:
-                # Используем traceback из самого исключения (в aiogram 3 format_exc() может быть пустым)
-                tb_lines = traceback.format_exception(type(event.exception), event.exception, event.exception.__traceback__)
-                tb_formatted = "".join(tb_lines)
-                # Обрезаем traceback, чтобы не превысить лимит Telegram (4096 символов)
-                if len(tb_formatted) > 3000:
-                    tb_formatted = tb_formatted[-3000:]
-                # Using HTML for safe formatting.
-                error_message = (
-                    f"<b>❌ Критическая ошибка</b>\n\n"
-                    f"<b>Тип:</b> <code>{html.escape(type(event.exception).__name__)}</code>\n"
-                    f"<b>Ошибка:</b> <code>{html.escape(str(event.exception))}</code>\n\n"
-                    f"<b>Traceback:</b>\n<pre>{html.escape(tb_formatted)}</pre>"
-                )
-                # Обрезаем итоговое сообщение до безопасной длины (4000 символов)
-                if len(error_message) > 4000:
-                    error_message = error_message[:4000] + "\n...(обрезано)"
-                for admin_id in admin_ids:
-                    await bot.send_message(admin_id, error_message)
-            except Exception as e:
-                logger.error(f"Не удалось уведомить администраторов об ошибке: {e}")
+    async def error_handler_wrapper(event: ErrorEvent, bot: Bot):
+        await error_handler(event, bot, db)
     # Register Middlewares
     dp.update.middleware(DbSessionMiddleware(db))
     dp.update.middleware(RoleMiddleware())
@@ -177,7 +208,10 @@ async def main():
     try:
         if WEBHOOK_URL:
             # Webhook-режим
-            from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+            from aiogram.webhook.aiohttp_server import (
+                SimpleRequestHandler,
+                setup_application,
+            )
             from aiohttp import web
 
             await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
@@ -225,12 +259,7 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
                     f"📞 <b>Контакты:</b> {html.escape(str(ticket['contact'] or '—'))}"
                 )
                 # Уведомляем админов из .env и из БД
-                admin_ids = set(ADMIN_IDS)
-                try:
-                    db_admins = await db.get_admins()
-                    admin_ids.update(row['user_id'] for row in db_admins)
-                except Exception as e:
-                    logger.warning(f"Не удалось получить админов из БД для уведомления о просроченной заявке: {e}")
+                admin_ids = await get_all_admin_ids(db)
 
                 for admin_id in admin_ids:
                     try:

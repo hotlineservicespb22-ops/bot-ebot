@@ -5,30 +5,59 @@
 - tasks.task.add: https://dev.1c-bitrix.ru/rest_help/tasks/task/tasks/task_add.php
 - disk.folder.uploadfile: https://dev.1c-bitrix.ru/rest_help/disk/disk_folder_uploadfile.php
 """
+import asyncio
 import datetime
 import logging
 import os
-from typing import List, Optional
 
 from aiohttp import ClientSession, FormData
 
 from bot.config import (
-    BITRIX_WEBHOOK_URL,
-    BITRIX_CREATED_BY,
-    BITRIX_TASK_PRIORITY,
-    BITRIX_TASK_DEADLINE_HOURS,
-    BITRIX_DISK_FOLDER_ID,
     BITRIX_CHAT_ID,
+    BITRIX_CREATED_BY,
+    BITRIX_DISK_FOLDER_ID,
     BITRIX_FROM_USER_ID,
+    BITRIX_TASK_DEADLINE_HOURS,
+    BITRIX_TASK_PRIORITY,
+    BITRIX_WEBHOOK_URL,
 )
 
 logger = logging.getLogger(__name__)
 
 # Кэш ID папки диска Битрикс24 (чтобы не делать сетевые запросы при каждой загрузке файла)
-_disk_folder_id_cache: Optional[int] = None
+_disk_folder_id_cache: int | None = None
+
+# Параметры ретраев при сетевых ошибках
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.0  # секунд
 
 
-def _make_deadline() -> Optional[str]:
+async def _post_with_retry(url: str, *args, retries: int = MAX_RETRIES, **kwargs):
+    """
+    Выполняет POST-запрос с ретраями при сетевых ошибках (aiohttp.ClientError, asyncio.TimeoutError).
+
+    Возвращает кортеж (response, data). При исчерпании ретраев — поднимает последнее исключение.
+    """
+    import aiohttp
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            async with ClientSession() as session:
+                async with session.post(url, *args, **kwargs) as resp:
+                    data = await resp.json()
+                    return resp, data
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            last_exc = e
+            if attempt < retries - 1:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"Сетевая ошибка при POST {url} (попытка {attempt + 1}/{retries}): {e}. Повтор через {delay:.1f}с"
+                )
+                await asyncio.sleep(delay)
+    raise last_exc
+
+
+def _make_deadline() -> str | None:
     """Возвращает дедлайн в формате ISO 8601, если он задан в конфигурации."""
     if not BITRIX_TASK_DEADLINE_HOURS:
         return None
@@ -41,7 +70,7 @@ def _make_deadline() -> Optional[str]:
         return None
 
 
-async def _get_disk_folder_id() -> Optional[int]:
+async def _get_disk_folder_id() -> int | None:
     """
     Возвращает ID папки на диске Битрикс24 для загрузки файлов.
 
@@ -118,7 +147,7 @@ async def _get_disk_folder_id() -> Optional[int]:
     return None
 
 
-async def upload_file_to_bitrix(file_path: str, filename: Optional[str] = None) -> Optional[int]:
+async def upload_file_to_bitrix(file_path: str, filename: str | None = None) -> int | None:
     """
     Загружает файл на диск Битрикс24 в указанную папку.
 
@@ -196,7 +225,7 @@ async def upload_file_to_bitrix(file_path: str, filename: Optional[str] = None) 
         return None
 
 
-async def send_message_to_chat(text: str, chat_id: Optional[int] = None) -> bool:
+async def send_message_to_chat(text: str, chat_id: int | None = None) -> bool:
     """
     Отправляет сообщение в чат Битрикс24 через метод im.message.add.
 
@@ -241,9 +270,7 @@ async def send_message_to_chat(text: str, chat_id: Optional[int] = None) -> bool
     payload["SYSTEM"] = "Y"
 
     try:
-        async with ClientSession() as session:
-            async with session.post(url, json=payload, timeout=15) as resp:
-                data = await resp.json()
+        resp, data = await _post_with_retry(url, json=payload, timeout=15)
 
         if not resp.ok:
             logger.error(f"Ошибка HTTP {resp.status} при отправке сообщения в чат Битрикс24: {data}")
@@ -263,11 +290,11 @@ async def create_task(
     title: str,
     description: str,
     responsible_id: int,
-    created_by: Optional[int] = None,
-    deadline: Optional[str] = None,
-    priority: Optional[str] = None,
-    uf_files: Optional[List[int]] = None,
-) -> Optional[int]:
+    created_by: int | None = None,
+    deadline: str | None = None,
+    priority: str | None = None,
+    uf_files: list[int] | None = None,
+) -> int | None:
     """
     Создаёт задачу в Битрикс24 через метод tasks.task.add.
 
@@ -318,9 +345,7 @@ async def create_task(
     payload = {"fields": fields}
 
     try:
-        async with ClientSession() as session:
-            async with session.post(url, json=payload, timeout=15) as resp:
-                data = await resp.json()
+        resp, data = await _post_with_retry(url, json=payload, timeout=15)
 
         if not resp.ok:
             logger.error(

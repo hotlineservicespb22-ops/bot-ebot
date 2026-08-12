@@ -1,5 +1,5 @@
-import asyncio
 import pytest
+
 from bot.database import Database
 
 

@@ -1,12 +1,23 @@
 import html
 import logging
-from aiogram import Router, Bot, F
-from aiogram.types import Message, CallbackQuery
+
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from bot.database import Database
+from aiogram.types import CallbackQuery, Message
+
+from bot.bitrix import create_task, send_message_to_chat, upload_file_to_bitrix
 from bot.config import BITRIX_ATTACH_FILES
-from bot.bitrix import create_task, upload_file_to_bitrix, send_message_to_chat
-from bot.keyboards import TicketCallback, main_menu, engineer_default_menu_kb, engineer_active_ticket_kb, engineer_select_client_kb, engineer_ticket_control_kb, active_ticket_menu_kb, rating_kb
+from bot.database import Database
+from bot.keyboards import (
+    TicketCallback,
+    active_ticket_menu_kb,
+    engineer_active_ticket_kb,
+    engineer_default_menu_kb,
+    engineer_select_client_kb,
+    engineer_ticket_control_kb,
+    main_menu,
+    rating_kb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +67,10 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
     await _delete_ticket_notifications(bot, db, ticket_id, except_engineer_id=eng_id)
 
     # Устанавливаем эту заявку как активную для инженера
-    # Сбрасываем данные навигации по списку, т.к. состав списков изменился
-    await state.update_data(active_ticket_id=ticket_id, ticket_view_ids=[], ticket_view_index=0)
+    # Сбрасываем данные навигации по списку, т.к. состав списков изменился.
+    # Не очищаем ticket_view_ids полностью — это ломает навигацию по списку заявок
+    # (инженер "теряет" свои заявки после переключения). Список пересоздаётся при возврате.
+    await state.update_data(active_ticket_id=ticket_id, ticket_view_index=0)
 
     ticket = await db.get_ticket(ticket_id)
     # Преобразуем sqlite3.Row в dict для безопасного доступа к полям

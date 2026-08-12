@@ -1,18 +1,31 @@
+import datetime
 import html
 import logging
-import datetime
-from aiogram import Router, Bot, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+import re
+
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramAPIError
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+
 from bot.database import Database
 from bot.keyboards import (
-    TicketCallback, engineer_select_client_kb, engineer_active_ticket_kb,
-    engineer_default_menu_kb, engineer_list_kb, engineer_detail_kb,
-    engineer_redirect_kb
+    TicketCallback,
+    engineer_active_ticket_kb,
+    engineer_default_menu_kb,
+    engineer_detail_kb,
+    engineer_list_kb,
+    engineer_redirect_kb,
+    engineer_select_client_kb,
 )
 from bot.media import save_media_file
+
 router = Router()
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
@@ -132,8 +145,9 @@ async def select_ticket_for_reply(callback: CallbackQuery, callback_data: Ticket
     if not await _require_engineer(callback, is_engineer):
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
-    # Сбрасываем возможное FSM-состояние выбора клиента
-    await state.clear()
+    # Устанавливаем активную заявку, НЕ очищая state целиком.
+    # state.clear() стирает навигацию по списку заявок (ticket_view_ids/index/mode),
+    # из-за чего после переключения список заявок инженера "пропадает".
     await state.update_data(active_ticket_id=callback_data.ticket_id)
     await callback.message.edit_reply_markup(reply_markup=None)  # Remove inline keyboard from previous message
     await callback.message.answer(
@@ -295,11 +309,6 @@ async def show_ticket_history(callback: CallbackQuery, callback_data: TicketCall
     history_text = format_ticket_history(messages)
 
     # Возвращаемся к деталям заявки после просмотра истории
-    data = await state.get_data()
-    mode = data.get('ticket_view_mode', 'mine')
-    ids = data.get('ticket_view_ids') or []
-    index = data.get('ticket_view_index') or 0
-
     back_kb = InlineKeyboardMarkup(
         inline_keyboard=[[
             InlineKeyboardButton(
@@ -421,10 +430,27 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
         if not active_tickets:
             return  # Engineer is not working on any ticket
 
+        # Приоритет: if engineer replies (reply) to a message, resolve the ticket
+        # from the "Заявка #ID" marker in the forwarded message's text/caption.
+        # This prevents messages from going to the wrong client when the engineer
+        # has multiple active tickets but has not switched the active selection.
+        reply_ticket_id = None
+        if message.reply_to_message:
+            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or '')
+            m = re.search(r"Заявка #(\d+)", reply_text)
+            if m:
+                reply_ticket_id = int(m.group(1))
+
         target_ticket = None
         if len(active_tickets) == 1:
             target_ticket = active_tickets[0]
-        else:
+        elif reply_ticket_id is not None:
+            # Нашли заявку по reply — используем её, если она принадлежит инженеру
+            for t in active_tickets:
+                if t['id'] == reply_ticket_id:
+                    target_ticket = t
+                    break
+        if target_ticket is None and len(active_tickets) > 1:
             # Check if engineer selected a ticket in state
             state_data = await state.get_data()
             selected_id = state_data.get("active_ticket_id")
@@ -433,6 +459,10 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
                     if t['id'] == selected_id:
                         target_ticket = t
                         break
+                # Если выбранная заявка устарела (завершена/отменена/не принадлежит
+                # инженеру) — сбрасываем её, чтобы не блокировать доставку сообщений.
+                if target_ticket is None:
+                    await state.update_data(active_ticket_id=None)
 
             if not target_ticket:
                 await message.answer(

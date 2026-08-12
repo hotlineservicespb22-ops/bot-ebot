@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+
 from dotenv import load_dotenv
 
 # Пытаемся загрузить как стандартный .env, так и .env.txt (файл может называться по-разному)

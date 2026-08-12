@@ -2,7 +2,6 @@ import logging
 import mimetypes
 import os
 import re
-from typing import Optional
 
 from aiogram import Bot
 
@@ -48,7 +47,7 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-def _guess_extension(file_name: Optional[str], mime_type: Optional[str], media_type: str) -> str:
+def _guess_extension(file_name: str | None, mime_type: str | None, media_type: str) -> str:
     """Определяет расширение файла по имени, MIME-типу или типу медиа."""
     if file_name:
         ext = os.path.splitext(file_name)[1]
@@ -83,9 +82,9 @@ async def save_media_file(
     file_id: str,
     ticket_id: int,
     media_type: str,
-    file_name: Optional[str] = None,
-    mime_type: Optional[str] = None,
-) -> Optional[str]:
+    file_name: str | None = None,
+    mime_type: str | None = None,
+) -> str | None:
     """
     Скачивает файл из Telegram и сохраняет его в папку заявки.
 

@@ -1,15 +1,22 @@
 import asyncio
 import csv
+import datetime
+import html
 import io
 import logging
-import html
-import datetime
-from aiogram import Router, Bot
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+
+from aiogram import Bot, Router
 from aiogram.filters import Command
-from bot.config import ADMIN_IDS # Import global ADMIN_IDS
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+
+from bot.config import ADMIN_IDS  # Import global ADMIN_IDS
 from bot.database import Database
-from bot.keyboards import AdminCallback, admin_menu_kb, engineer_duty_kb, back_to_admin_kb
+from bot.keyboards import (
+    AdminCallback,
+    admin_menu_kb,
+    back_to_admin_kb,
+    engineer_duty_kb,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)

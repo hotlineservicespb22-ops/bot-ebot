@@ -1,8 +1,12 @@
 import time
-from typing import Any, Awaitable, Callable, Dict
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject, CallbackQuery
+from aiogram.types import CallbackQuery, TelegramObject
+
 from bot.database import Database
+
 
 class DbSessionMiddleware(BaseMiddleware):
     def __init__(self, db: Database):
@@ -11,9 +15,9 @@ class DbSessionMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any]
+        data: dict[str, Any]
     ) -> Any:
         data["db"] = self.db
         return await handler(event, data)
@@ -21,9 +25,9 @@ class DbSessionMiddleware(BaseMiddleware):
 class RoleMiddleware(BaseMiddleware):
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any]
+        data: dict[str, Any]
     ) -> Any:
         user = data.get("event_from_user")
         if not user:
@@ -44,13 +48,13 @@ class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, interval: float = 0.5):
         super().__init__()
         self.interval = interval
-        self.last_time: Dict[int, float] = {}
+        self.last_time: dict[int, float] = {}
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: Dict[str, Any]
+        data: dict[str, Any]
     ) -> Any:
         user = data.get("event_from_user")
         if not user:

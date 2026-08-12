@@ -1,9 +1,13 @@
 import html
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, 
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
+
 from aiogram.filters.callback_data import CallbackData
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
+
 
 class TicketCallback(CallbackData, prefix="ticket"):
     action: str

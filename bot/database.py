@@ -1,13 +1,13 @@
-import aiosqlite
 import asyncio
 import datetime
-from typing import List, Optional, Tuple
-from bot.config import DB_PATH
+
+import aiosqlite
+
 
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.conn: Optional[aiosqlite.Connection] = None
+        self.conn: aiosqlite.Connection | None = None
         self.lock = asyncio.Lock()
 
     async def connect(self):
@@ -107,6 +107,19 @@ class Database:
                 )
             """)
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_notifications_ticket ON ticket_notifications(ticket_id)")
+            # Relay message map table (message_id отправленного сообщения -> ticket_id)
+            # Используется для сопоставления ответа (reply) инженера с конкретной заявкой.
+            await self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS relay_message_map (
+                    message_id INTEGER PRIMARY KEY,
+                    ticket_id INTEGER,
+                    receiver_id INTEGER,
+                    created_at TEXT,
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                )
+            """)
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_relay_message_map_ticket ON relay_message_map(ticket_id)")
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_relay_message_map_receiver ON relay_message_map(receiver_id)")
             # Indexes
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_client ON tickets(client_id)")
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_engineer ON tickets(engineer_id)")
@@ -135,6 +148,9 @@ class Database:
                     await self.conn.execute(f"ALTER TABLE tickets ADD COLUMN {col_name} {col_type}")
                     await self.conn.commit()
                     columns.add(col_name)
+
+            # Индекс на created_at создаём после того, как колонка гарантированно существует
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
 
             # Миграция для таблицы engineers: добавляем bitrix_user_id
             cursor = await self.conn.execute("PRAGMA table_info(engineers)")
@@ -165,12 +181,12 @@ class Database:
             await self.conn.execute("DELETE FROM engineers WHERE user_id = ?", (user_id,))
             await self.conn.commit()
 
-    async def get_engineers(self) -> List[aiosqlite.Row]:
+    async def get_engineers(self) -> list[aiosqlite.Row]:
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM engineers WHERE is_active = 1")
             return await cursor.fetchall()
 
-    async def get_all_engineers(self) -> List[aiosqlite.Row]:
+    async def get_all_engineers(self) -> list[aiosqlite.Row]:
         """Возвращает всех инженеров (включая неактивных)."""
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM engineers ORDER BY name")
@@ -199,7 +215,7 @@ class Database:
             )
             await self.conn.commit()
 
-    async def get_bitrix_user_id(self, user_id: int) -> Optional[int]:
+    async def get_bitrix_user_id(self, user_id: int) -> int | None:
         """Возвращает ID пользователя Битрикс24 для инженера (или None)."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -209,7 +225,7 @@ class Database:
             row = await cursor.fetchone()
             return row['bitrix_user_id'] if row and row['bitrix_user_id'] is not None else None
 
-    async def get_engineer_name(self, user_id: int) -> Optional[str]:
+    async def get_engineer_name(self, user_id: int) -> str | None:
         """Возвращает имя инженера по его Telegram ID (или None)."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -230,7 +246,7 @@ class Database:
             await self.conn.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
             await self.conn.commit()
 
-    async def get_admins(self) -> List[aiosqlite.Row]:
+    async def get_admins(self) -> list[aiosqlite.Row]:
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM admins")
             return await cursor.fetchall()
@@ -254,13 +270,13 @@ class Database:
         brand: str,
         cnc_model: str,
         problem: str,
-        media_id: Optional[str],
+        media_id: str | None,
         city: str,
         inn_contract: str,
         contact: str,
         machine_info: str = '',
         company_city: str = '',
-        machine_media_id: Optional[str] = None
+        machine_media_id: str | None = None
     ) -> int:
         async with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -278,7 +294,7 @@ class Database:
             await self.conn.commit()
             return ticket_id
 
-    async def get_ticket(self, ticket_id: int) -> Optional[aiosqlite.Row]:
+    async def get_ticket(self, ticket_id: int) -> aiosqlite.Row | None:
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,))
             return await cursor.fetchone()
@@ -302,7 +318,7 @@ class Database:
             await self.conn.commit()
             return True
 
-    async def get_active_ticket_for_client(self, client_id: int) -> Optional[aiosqlite.Row]:
+    async def get_active_ticket_for_client(self, client_id: int) -> aiosqlite.Row | None:
         async with self.lock:
             cursor = await self.conn.execute(
                 "SELECT * FROM tickets WHERE client_id = ? AND status IN ('open', 'in_progress') ORDER BY id DESC LIMIT 1",
@@ -310,7 +326,7 @@ class Database:
             )
             return await cursor.fetchone()
 
-    async def get_client_tickets(self, client_id: int, limit: int = 10) -> List[aiosqlite.Row]:
+    async def get_client_tickets(self, client_id: int, limit: int = 10) -> list[aiosqlite.Row]:
         """Возвращает историю заявок клиента (последние N)."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -319,7 +335,7 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def get_active_tickets_for_engineer(self, engineer_id: int) -> List[aiosqlite.Row]:
+    async def get_active_tickets_for_engineer(self, engineer_id: int) -> list[aiosqlite.Row]:
         async with self.lock:
             cursor = await self.conn.execute(
                 "SELECT * FROM tickets WHERE engineer_id = ? AND status = 'in_progress' ORDER BY id DESC",
@@ -327,7 +343,7 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def get_open_tickets(self) -> List[aiosqlite.Row]:
+    async def get_open_tickets(self) -> list[aiosqlite.Row]:
         """Возвращает нераспределенные заявки (статус 'open', без инженера)."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -335,12 +351,12 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def get_all_tickets(self) -> List[aiosqlite.Row]:
+    async def get_all_tickets(self) -> list[aiosqlite.Row]:
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM tickets")
             return await cursor.fetchall()
 
-    async def get_tickets_by_period(self, start_date: str, end_date: str) -> List[aiosqlite.Row]:
+    async def get_tickets_by_period(self, start_date: str, end_date: str) -> list[aiosqlite.Row]:
         """Возвращает заявки, созданные в заданном периоде (ISO-даты)."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -349,7 +365,7 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def get_expired_open_tickets(self, timeout_seconds: int) -> List[aiosqlite.Row]:
+    async def get_expired_open_tickets(self, timeout_seconds: int) -> list[aiosqlite.Row]:
         """
         Возвращает заявки в статусе 'open', которые висят дольше timeout_seconds.
         """
@@ -384,20 +400,20 @@ class Database:
             )
             await self.conn.commit()
 
-    async def get_rating_for_ticket(self, ticket_id: int) -> Optional[aiosqlite.Row]:
+    async def get_rating_for_ticket(self, ticket_id: int) -> aiosqlite.Row | None:
         """Возвращает оценку по заявке."""
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM ratings WHERE ticket_id = ?", (ticket_id,))
             return await cursor.fetchone()
 
-    async def get_avg_rating(self) -> Optional[float]:
+    async def get_avg_rating(self) -> float | None:
         """Средняя оценка по всем заявкам."""
         async with self.lock:
             cursor = await self.conn.execute("SELECT AVG(rating) as avg_rating FROM ratings")
             row = await cursor.fetchone()
             return row['avg_rating'] if row else None
 
-    async def get_avg_resolution_time(self) -> Optional[float]:
+    async def get_avg_resolution_time(self) -> float | None:
         """Среднее время решения заявки (в часах) для завершённых заявок."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -407,7 +423,7 @@ class Database:
             row = await cursor.fetchone()
             return row['avg_hours'] if row else None
 
-    async def get_tickets_by_city(self) -> List[aiosqlite.Row]:
+    async def get_tickets_by_city(self) -> list[aiosqlite.Row]:
         """Статистика заявок по городам."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -426,7 +442,7 @@ class Database:
             )
             await self.conn.commit()
 
-    async def get_messages_for_ticket(self, ticket_id: int) -> List[aiosqlite.Row]:
+    async def get_messages_for_ticket(self, ticket_id: int) -> list[aiosqlite.Row]:
         """Возвращает историю переписки по заявке."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -435,7 +451,7 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def get_engineer_stats(self) -> List[aiosqlite.Row]:
+    async def get_engineer_stats(self) -> list[aiosqlite.Row]:
         """
         Retrieves statistics for each engineer, including active and closed tickets.
         """
@@ -469,7 +485,7 @@ class Database:
             )
             await self.conn.commit()
 
-    async def get_media_for_ticket(self, ticket_id: int) -> List[aiosqlite.Row]:
+    async def get_media_for_ticket(self, ticket_id: int) -> list[aiosqlite.Row]:
         """Возвращает список медиафайлов заявки."""
         async with self.lock:
             cursor = await self.conn.execute(
@@ -489,7 +505,7 @@ class Database:
             )
             await self.conn.commit()
 
-    async def get_ticket_notifications(self, ticket_id: int) -> List[aiosqlite.Row]:
+    async def get_ticket_notifications(self, ticket_id: int) -> list[aiosqlite.Row]:
         """Возвращает список уведомлений о заявке, отправленных инженерам."""
         async with self.lock:
             cursor = await self.conn.execute(
