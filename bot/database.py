@@ -95,6 +95,18 @@ class Database:
                     FOREIGN KEY (ticket_id) REFERENCES tickets(id)
                 )
             """)
+            # Ticket notifications table (message_id уведомлений, отправленных инженерам)
+            await self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS ticket_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_id INTEGER,
+                    engineer_id INTEGER,
+                    message_id INTEGER,
+                    created_at TEXT,
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                )
+            """)
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_notifications_ticket ON ticket_notifications(ticket_id)")
             # Indexes
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_client ON tickets(client_id)")
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_engineer ON tickets(engineer_id)")
@@ -453,3 +465,32 @@ class Database:
                 (ticket_id,)
             )
             return await cursor.fetchall()
+
+    # Ticket Notifications CRUD
+    async def save_ticket_notification(self, ticket_id: int, engineer_id: int, message_id: int):
+        """Сохраняет message_id уведомления о заявке, отправленного инженеру."""
+        async with self.lock:
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            await self.conn.execute(
+                "INSERT INTO ticket_notifications (ticket_id, engineer_id, message_id, created_at) VALUES (?, ?, ?, ?)",
+                (ticket_id, engineer_id, message_id, now)
+            )
+            await self.conn.commit()
+
+    async def get_ticket_notifications(self, ticket_id: int) -> List[aiosqlite.Row]:
+        """Возвращает список уведомлений о заявке, отправленных инженерам."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "SELECT * FROM ticket_notifications WHERE ticket_id = ?",
+                (ticket_id,)
+            )
+            return await cursor.fetchall()
+
+    async def delete_ticket_notifications(self, ticket_id: int):
+        """Удаляет все уведомления о заявке (после того, как заявка взята/закрыта)."""
+        async with self.lock:
+            await self.conn.execute(
+                "DELETE FROM ticket_notifications WHERE ticket_id = ?",
+                (ticket_id,)
+            )
+            await self.conn.commit()

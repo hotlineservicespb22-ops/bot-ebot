@@ -5,7 +5,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramConflictError
-from aiogram.types import ErrorEvent
+from aiogram.types import ErrorEvent, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 import traceback
 import html
 
@@ -49,6 +49,62 @@ def get_storage():
 
 # FSM timeout with MemoryStorage is complex and requires custom state tracking or a different storage backend.
 # For this refactoring, we rely on explicit /cancel and inline cancel buttons.
+
+# Команды, доступные всем пользователям
+DEFAULT_COMMANDS = [
+    BotCommand(command="start", description="🔄 Запустить бота"),
+    BotCommand(command="help", description="❓ Помощь"),
+    BotCommand(command="my_requests", description="📋 Мои заявки"),
+    BotCommand(command="cancel", description="❌ Отменить действие"),
+]
+
+# Команды, доступные только администраторам
+ADMIN_COMMANDS = [
+    BotCommand(command="admin", description="🛠 Админ-панель"),
+    BotCommand(command="stats", description="📊 Статистика"),
+    BotCommand(command="export", description="📥 Экспорт CSV"),
+    BotCommand(command="add_admin", description="➕ Добавить админа"),
+    BotCommand(command="del_admin", description="➖ Удалить админа"),
+    BotCommand(command="list_admin", description="👑 Список админов"),
+    BotCommand(command="add_eng", description="➕ Добавить инженера"),
+    BotCommand(command="del_eng", description="➖ Удалить инженера"),
+    BotCommand(command="list_eng", description="👥 Список инженеров"),
+    BotCommand(command="bulk_add_eng", description="📦 Массовое добавление инженеров"),
+    BotCommand(command="set_bitrix", description="🔗 Привязка к Битрикс24"),
+    BotCommand(command="my_tickets", description="📋 Мои заявки в работе"),
+]
+
+async def setup_commands(bot: Bot, db: Database):
+    """Устанавливает меню команд для всех пользователей и отдельно для админов."""
+    # Общие команды для всех
+    await bot.set_my_commands(DEFAULT_COMMANDS, scope=BotCommandScopeDefault())
+
+    # Команды для админов из .env (ADMIN_IDS)
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.set_my_commands(
+                DEFAULT_COMMANDS + ADMIN_COMMANDS,
+                scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось установить команды для админа {admin_id}: {e}")
+
+    # Команды для админов из БД
+    db_admins = await db.get_admins()
+    for row in db_admins:
+        admin_id = row['user_id']
+        if admin_id in ADMIN_IDS:
+            continue  # Уже установили выше
+        try:
+            await bot.set_my_commands(
+                DEFAULT_COMMANDS + ADMIN_COMMANDS,
+                scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось установить команды для админа {admin_id}: {e}")
+
+    logger.info("Меню команд установлено (общие + админские).")
+
 async def main():
     # Database initialization
     db = Database(DB_PATH)
@@ -60,6 +116,9 @@ async def main():
     # Глобальная настройка HTML-разметки: все сообщения по умолчанию парсятся как HTML
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=get_storage())
+
+    # Устанавливаем меню команд (общие + админские)
+    await setup_commands(bot, db)
 
     # Error handler
     @dp.error()
@@ -74,6 +133,9 @@ async def main():
         if ADMIN_IDS:
             try:
                 tb_formatted = traceback.format_exc()
+                # Обрезаем traceback, чтобы не превысить лимит Telegram (4096 символов)
+                if len(tb_formatted) > 3000:
+                    tb_formatted = tb_formatted[-3000:]
                 # Using HTML for safe formatting.
                 error_message = (
                     f"<b>❌ Критическая ошибка</b>\n\n"
@@ -81,6 +143,9 @@ async def main():
                     f"<b>Ошибка:</b> <code>{html.escape(str(event.exception))}</code>\n\n"
                     f"<b>Traceback:</b>\n<pre>{html.escape(tb_formatted)}</pre>"
                 )
+                # Обрезаем итоговое сообщение до безопасной длины (4000 символов)
+                if len(error_message) > 4000:
+                    error_message = error_message[:4000] + "\n...(обрезано)"
                 for admin_id in ADMIN_IDS:
                     await bot.send_message(admin_id, error_message)
             except Exception as e:
@@ -162,10 +227,8 @@ async def shutdown():
     """Корректное завершение работы бота."""
     logger.info("Бот останавливается...")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот остановлен")
-    except asyncio.CancelledError:
-        logger.info("Бот остановлен (отмена задачи)")
+    except KeyboardInterrupt:
+        print("Бот остановлен")

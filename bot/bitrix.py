@@ -41,17 +41,51 @@ def _make_deadline() -> Optional[str]:
 async def _get_disk_folder_id() -> Optional[int]:
     """
     Возвращает ID папки на диске Битрикс24 для загрузки файлов.
-    Если BITRIX_DISK_FOLDER_ID задан — использует его.
-    Иначе пытается получить общий диск (Common disk).
-    """
-    if BITRIX_DISK_FOLDER_ID:
-        try:
-            return int(BITRIX_DISK_FOLDER_ID)
-        except ValueError:
-            logger.warning(f"Некорректное значение BITRIX_DISK_FOLDER_ID: {BITRIX_DISK_FOLDER_ID}")
 
+    Логика:
+    1. Если BITRIX_DISK_FOLDER_ID задан — пробуем использовать его как ID папки.
+    2. Если это ID хранилища (а не папки) — резолвим ROOT_OBJECT_ID хранилища.
+    3. Иначе пытаемся получить общий диск (Common disk).
+    """
     if not BITRIX_WEBHOOK_URL:
         return None
+
+    if BITRIX_DISK_FOLDER_ID:
+        try:
+            candidate = int(BITRIX_DISK_FOLDER_ID)
+        except ValueError:
+            logger.warning(f"Некорректное значение BITRIX_DISK_FOLDER_ID: {BITRIX_DISK_FOLDER_ID}")
+            candidate = None
+
+        if candidate is not None:
+            # Пробуем использовать как ID папки напрямую
+            url = f"{BITRIX_WEBHOOK_URL.rstrip('/')}/disk.folder.get.json"
+            try:
+                async with ClientSession() as session:
+                    async with session.post(url, json={"id": candidate}, timeout=15) as resp:
+                        data = await resp.json()
+                if "error" not in data:
+                    logger.info(f"BITRIX_DISK_FOLDER_ID={candidate} — это ID папки.")
+                    return candidate
+            except Exception as e:
+                logger.warning(f"Не удалось проверить BITRIX_DISK_FOLDER_ID={candidate} как папку: {e}")
+
+            # Если это не папка — пробуем как ID хранилища (disk.storage.get)
+            url = f"{BITRIX_WEBHOOK_URL.rstrip('/')}/disk.storage.get.json"
+            try:
+                async with ClientSession() as session:
+                    async with session.post(url, json={"id": candidate}, timeout=15) as resp:
+                        data = await resp.json()
+                storage = data.get("result", {})
+                root_id = storage.get("ROOT_OBJECT_ID")
+                if root_id:
+                    logger.info(
+                        f"BITRIX_DISK_FOLDER_ID={candidate} — это ID хранилища "
+                        f"'{storage.get('NAME', '')}', ROOT_OBJECT_ID={root_id}."
+                    )
+                    return int(root_id)
+            except Exception as e:
+                logger.warning(f"Не удалось проверить BITRIX_DISK_FOLDER_ID={candidate} как хранилище: {e}")
 
     # Пытаемся получить общий диск: disk.storage.getlist
     url = f"{BITRIX_WEBHOOK_URL.rstrip('/')}/disk.storage.getlist.json"
@@ -65,7 +99,7 @@ async def _get_disk_folder_id() -> Optional[int]:
             folder_id = storages[0].get("ROOT_OBJECT_ID")
             if folder_id:
                 logger.info(f"Получен ID общего диска Битрикс24: {folder_id}")
-                return folder_id
+                return int(folder_id)
     except Exception as e:
         logger.error(f"Не удалось получить общий диск Битрикс24: {e}")
 
@@ -110,17 +144,22 @@ async def upload_file_to_bitrix(file_path: str, filename: Optional[str] = None) 
             logger.error(f"Ошибка Битрикс24 при получении uploadUrl: {data}")
             return None
 
-        upload_url = data.get("result", {}).get("uploadUrl")
+        result = data.get("result", {})
+        upload_url = result.get("uploadUrl")
+        # Имя поля для загрузки файла (обычно "file")
+        field_name = result.get("field", "file")
         if not upload_url:
             logger.error(f"Не удалось получить uploadUrl из ответа Битрикс24: {data}")
             return None
 
         # Шаг 2: загружаем файл на uploadUrl
+        # Передаём файловый объект напрямую (не f.read()), чтобы aiohttp
+        # корректно обработал multipart/form-data (размер, потоковая передача).
         with open(file_path, "rb") as f:
             form = FormData()
             form.add_field(
-                "file",
-                f.read(),
+                field_name,
+                f,
                 filename=fname,
                 content_type="application/octet-stream",
             )
@@ -248,14 +287,19 @@ async def create_task(
     # Преобразуем HTML в BBCode для корректного отображения жирного текста в Битрикс24
     description = description.replace('<b>', '[B]').replace('</b>', '[/B]')
 
+    # Постановщик задачи: аргумент > жёстко заданный ID 414 (по требованию заказчика)
+    # Всегда ставим постановщиком пользователя с ID 414, если не передан явный created_by.
+    task_created_by = created_by or 414
+
     fields = {
         "TITLE": title,
         "DESCRIPTION": description,
         "RESPONSIBLE_ID": responsible_id,
         "PRIORITY": task_priority,
-        "CREATED_BY": 414,          # Постановщик задачи
         "TAGS": ["Бот-Телеграм"],   # Тег задачи (массив строк)
     }
+    if task_created_by:
+        fields["CREATED_BY"] = task_created_by
     if task_deadline:
         fields["DEADLINE"] = task_deadline
     if uf_files:

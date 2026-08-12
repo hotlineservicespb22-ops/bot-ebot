@@ -41,6 +41,9 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
             )
         return
 
+    # Удаляем уведомления об этой заявке у других инженеров
+    await _delete_ticket_notifications(bot, db, ticket_id, except_engineer_id=eng_id)
+
     # Устанавливаем эту заявку как активную для инженера
     # Сбрасываем данные навигации по списку, т.к. состав списков изменился
     await state.update_data(active_ticket_id=ticket_id, ticket_view_ids=[], ticket_view_index=0)
@@ -49,47 +52,77 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
     # Преобразуем sqlite3.Row в dict для безопасного доступа к полям
     ticket_dict = dict(ticket) if ticket else {}
 
-    # Создаём задачу в Битрикс24 на инженера, взявшего заявку
-    task_id = await _create_bitrix_task_for_ticket(db, ticket)
+    # Создаём задачу в Битрикс24 на инженера, взявшего заявку.
+    # Оборачиваем в try/except, чтобы сбой Битрикс24 не блокировал взятие заявки.
+    try:
+        task_id = await _create_bitrix_task_for_ticket(db, ticket)
+    except Exception as e:
+        logger.error(f"Ошибка при создании задачи Битрикс24 для заявки #{ticket_id}: {e}")
+        task_id = None
 
     # Отправляем уведомление в чат Битрикс24 о новой заявке
     if task_id:
-        engineer_name = callback.from_user.full_name
-        # Получаем ID пользователя Битрикс24 для упоминания инженера в чате
-        bitrix_engineer_id = await db.get_bitrix_user_id(eng_id)
-        # Формируем упоминание инженера: [USER=ID]Имя[/USER]
-        if bitrix_engineer_id:
-            engineer_mention = f"[USER={bitrix_engineer_id}]{engineer_name}[/USER]"
-        else:
-            engineer_mention = html.escape(engineer_name)
-        # Ссылка на задачу в Битрикс24
-        task_url = f"https://crm.wattsan.ru/company/personal/user/{bitrix_engineer_id or ''}/tasks/task/view/{task_id}/"
-        chat_msg = (
-            f"🚨 [B]{engineer_mention}[/B] взял заявку [B]#{ticket_id}[/B] в работу.\n\n"
-            f"🏢 [B]Компания/Город:[/B] {html.escape(str(ticket_dict.get('company_city') or '—'))}\n"
-            f"🔧 [B]Станок:[/B] {html.escape(str(ticket_dict.get('machine_info') or '—'))}\n"
-            f"📝 [B]Проблема:[/B] {html.escape(str(ticket_dict.get('problem') or '—'))}\n\n"
-            f"📌 [B]Задача:[/B] [URL={task_url}]Заявка #{task_id}[/URL]"
-        )
-        await send_message_to_chat(chat_msg)
+        try:
+            engineer_name = callback.from_user.full_name
+            # Получаем ID пользователя Битрикс24 для упоминания инженера в чате
+            bitrix_engineer_id = await db.get_bitrix_user_id(eng_id)
+            # Формируем упоминание инженера: [USER=ID]Имя[/USER]
+            if bitrix_engineer_id:
+                engineer_mention = f"[USER={bitrix_engineer_id}]{engineer_name}[/USER]"
+            else:
+                engineer_mention = html.escape(engineer_name)
+            # Ссылка на задачу в Битрикс24
+            task_url = f"https://crm.wattsan.ru/company/personal/user/{bitrix_engineer_id or ''}/tasks/task/view/{task_id}/"
+            chat_msg = (
+                f"🚨 [B]{engineer_mention}[/B] взял заявку [B]#{ticket_id}[/B] в работу.\n\n"
+                f"🏢 [B]Компания/Город:[/B] {html.escape(str(ticket_dict.get('company_city') or '—'))}\n"
+                f"🔧 [B]Станок:[/B] {html.escape(str(ticket_dict.get('machine_info') or '—'))}\n"
+                f"📝 [B]Проблема:[/B] {html.escape(str(ticket_dict.get('problem') or '—'))}\n\n"
+                f"📌 [B]Задача:[/B] [URL={task_url}]Заявка #{task_id}[/URL]"
+            )
+            await send_message_to_chat(chat_msg)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление в чат Битрикс24 о заявке #{ticket_id}: {e}")
 
-    await callback.message.edit_text(
-        callback.message.html_text + f"\n\n👨‍🔧 <b>Взято в работу инженером:</b> {html.escape(callback.from_user.full_name)}",
-        reply_markup=engineer_ticket_control_kb(ticket_id)
-    )
-    
-    await bot.send_message(
-        ticket['client_id'],
-        (
-            f"👨‍🔧 К вашей заявке #{ticket_id} подключился дежурный инженер.\n"
-            "Вы можете писать уточнения и присылать фотографии прямо в этот чат."
-        ),
-        reply_markup=active_ticket_menu_kb()
-    )
-    await callback.message.answer(
-        f"✅ Заявка #{ticket_id} взята в работу и установлена как активный чат. Ваши сообщения будут направлены этому клиенту. Используйте /my_tickets для переключения.",
-        reply_markup=engineer_active_ticket_kb()
-    )
+    # Обновляем сообщение о взятии заявки.
+    # Если сообщение — медиа (фото/видео), используем edit_caption, иначе edit_text.
+    try:
+        taken_suffix = f"\n\n👨‍🔧 <b>Взято в работу инженером:</b> {html.escape(callback.from_user.full_name)}"
+        if callback.message.caption is not None:
+            # Медиа-сообщение: редактируем подпись
+            new_caption = (callback.message.caption or '') + taken_suffix
+            await callback.message.edit_caption(
+                caption=new_caption,
+                reply_markup=engineer_ticket_control_kb(ticket_id)
+            )
+        else:
+            # Текстовое сообщение: редактируем текст
+            await callback.message.edit_text(
+                callback.message.html_text + taken_suffix,
+                reply_markup=engineer_ticket_control_kb(ticket_id)
+            )
+    except Exception as e:
+        logger.warning(f"Не удалось обновить сообщение о взятии заявки #{ticket_id}: {e}")
+
+    try:
+        await bot.send_message(
+            ticket['client_id'],
+            (
+                f"👨‍🔧 К вашей заявке #{ticket_id} подключился дежурный инженер.\n"
+                "Вы можете писать уточнения и присылать фотографии прямо в этот чат."
+            ),
+            reply_markup=active_ticket_menu_kb()
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о взятии заявки #{ticket_id}: {e}")
+
+    try:
+        await callback.message.answer(
+            f"✅ Заявка #{ticket_id} взята в работу и установлена как активный чат. Ваши сообщения будут направлены этому клиенту. Используйте /my_tickets для переключения.",
+            reply_markup=engineer_active_ticket_kb()
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить подтверждение инженеру о взятии заявки #{ticket_id}: {e}")
 
     # Отправляем фото шильдика станка, если оно было прикреплено клиентом
     machine_media_id = ticket['machine_media_id'] if ticket else None
@@ -119,14 +152,27 @@ async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: Ti
 
     await db.close_ticket(ticket_id, status='completed', comment='Работы успешно завершены инженером')
 
-    await callback.message.edit_text(callback.message.html_text + "\n\n✅ <b>Статус: Заявка успешно завершена.</b>")
+    # Обновляем сообщение о завершении заявки (учитываем медиа-сообщения)
+    try:
+        completed_suffix = "\n\n✅ <b>Статус: Заявка успешно завершена.</b>"
+        if callback.message.caption is not None:
+            await callback.message.edit_caption(
+                caption=(callback.message.caption or '') + completed_suffix
+            )
+        else:
+            await callback.message.edit_text(callback.message.html_text + completed_suffix)
+    except Exception as e:
+        logger.warning(f"Не удалось обновить сообщение о завершении заявки #{ticket_id}: {e}")
     await callback.answer("Заявка закрыта как выполненная.")
 
-    await bot.send_message(
-        ticket['client_id'],
-        f"✅ Заявка #{ticket_id} успешно завершена специалистом. Спасибо за обращение!\n\nОцените, пожалуйста, качество обслуживания:",
-        reply_markup=rating_kb(ticket_id)
-    )
+    try:
+        await bot.send_message(
+            ticket['client_id'],
+            f"✅ Заявка #{ticket_id} успешно завершена специалистом. Спасибо за обращение!\n\nОцените, пожалуйста, качество обслуживания:",
+            reply_markup=rating_kb(ticket_id)
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о завершении заявки #{ticket_id}: {e}")
 
     current_state_data = await state.get_data()
     if current_state_data.get("active_ticket_id") == ticket_id:
@@ -134,10 +180,16 @@ async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: Ti
 
     remaining_tickets = await db.get_active_tickets_for_engineer(callback.from_user.id)
     if remaining_tickets:
-        await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets)) # Inline keyboard
-        await callback.message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb()) # Revert to default ReplyKeyboardMarkup
+        try:
+            await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets)) # Inline keyboard
+            await callback.message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb()) # Revert to default ReplyKeyboardMarkup
+        except Exception as e:
+            logger.warning(f"Не удалось отправить список оставшихся заявок инженеру {callback.from_user.id}: {e}")
     else:
-        await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+        try:
+            await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+        except Exception as e:
+            logger.warning(f"Не удалось отправить сообщение об отсутствии заявок инженеру {callback.from_user.id}: {e}")
 
 
 @router.message(F.text == "✅ Завершить текущую")
@@ -239,14 +291,27 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
 
     await db.close_ticket(ticket_id, status='canceled', comment='Отменена инженером')
 
-    await callback.message.edit_text(callback.message.html_text + "\n\n🚫 <b>Статус: Заявка отменена.</b>")
+    # Обновляем сообщение об отмене заявки (учитываем медиа-сообщения)
+    try:
+        canceled_suffix = "\n\n🚫 <b>Статус: Заявка отменена.</b>"
+        if callback.message.caption is not None:
+            await callback.message.edit_caption(
+                caption=(callback.message.caption or '') + canceled_suffix
+            )
+        else:
+            await callback.message.edit_text(callback.message.html_text + canceled_suffix)
+    except Exception as e:
+        logger.warning(f"Не удалось обновить сообщение об отмене заявки #{ticket_id}: {e}")
     await callback.answer("Заявка переведена в статус отмененных.")
 
-    await bot.send_message(
-        ticket['client_id'],
-        f"🚫 Заявка #{ticket_id} была отменена инженером.",
-        reply_markup=main_menu()
-    )
+    try:
+        await bot.send_message(
+            ticket['client_id'],
+            f"🚫 Заявка #{ticket_id} была отменена инженером.",
+            reply_markup=main_menu()
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} об отмене заявки #{ticket_id}: {e}")
 
     current_state_data = await state.get_data()
     if current_state_data.get("active_ticket_id") == ticket_id:
@@ -254,9 +319,44 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
 
     remaining_tickets = await db.get_active_tickets_for_engineer(callback.from_user.id)
     if remaining_tickets:
-        await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets))
+        try:
+            await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets))
+        except Exception as e:
+            logger.warning(f"Не удалось отправить список оставшихся заявок инженеру {callback.from_user.id}: {e}")
     else:
-        await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+        try:
+            await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+        except Exception as e:
+            logger.warning(f"Не удалось отправить сообщение об отсутствии заявок инженеру {callback.from_user.id}: {e}")
+
+
+async def _delete_ticket_notifications(bot: Bot, db: Database, ticket_id: int, except_engineer_id: int = None):
+    """
+    Удаляет уведомления о заявке у всех инженеров, кроме указанного.
+
+    Args:
+        bot: Экземпляр бота.
+        db: Экземпляр БД.
+        ticket_id: ID заявки.
+        except_engineer_id: ID инженера, у которого НЕ удалять уведомление (тот, кто взял заявку).
+    """
+    try:
+        notifications = await db.get_ticket_notifications(ticket_id)
+        for notif in notifications:
+            engineer_id = notif['engineer_id']
+            message_id = notif['message_id']
+            # Не удаляем уведомление у инженера, который взял заявку
+            if except_engineer_id is not None and engineer_id == except_engineer_id:
+                continue
+            try:
+                await bot.delete_message(chat_id=engineer_id, message_id=message_id)
+                logger.info(f"Удалено уведомление о заявке #{ticket_id} у инженера {engineer_id} (msg_id={message_id})")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить уведомление о заявке #{ticket_id} у инженера {engineer_id}: {e}")
+        # Очищаем записи об уведомлениях (все, включая того, кто взял — его сообщение уже отредактировано)
+        await db.delete_ticket_notifications(ticket_id)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении уведомлений о заявке #{ticket_id}: {e}")
 
 
 async def _create_bitrix_task_for_ticket(db: Database, ticket):

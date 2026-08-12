@@ -406,26 +406,31 @@ async def ticket_contact(message: Message, state: FSMContext, bot: Bot, db: Data
 
     for row in engineers:
         try:
+            sent_msg = None
             if media_id and media_type == 'photo':
-                await bot.send_photo(
+                sent_msg = await bot.send_photo(
                     row['user_id'],
                     photo=media_id,
                     caption=ticket_text,
                     reply_markup=ticket_action_kb(ticket_id)
                 )
             elif media_id and media_type == 'video':
-                await bot.send_video(
+                sent_msg = await bot.send_video(
                     row['user_id'],
                     video=media_id,
                     caption=ticket_text,
                     reply_markup=ticket_action_kb(ticket_id)
                 )
             else:
-                await bot.send_message(
+                sent_msg = await bot.send_message(
                     row['user_id'],
                     ticket_text,
                     reply_markup=ticket_action_kb(ticket_id)
                 )
+
+            # Сохраняем message_id уведомления, чтобы удалить его, когда заявку возьмут
+            if sent_msg:
+                await db.save_ticket_notification(ticket_id, row['user_id'], sent_msg.message_id)
 
             # Отправляем фото/видео шильдика отдельным сообщением
             if machine_media_id:
