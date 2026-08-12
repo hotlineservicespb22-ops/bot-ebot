@@ -36,9 +36,19 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
                     if eng['user_id'] == current_ticket['engineer_id']:
                         engineer_name = eng['name']
                         break
-            await callback.message.edit_text(
-                callback.message.html_text + f"\n\n👨‍🔧 <b>Заявка уже в работе</b>"
-            )
+            # Обновляем сообщение (учитываем медиа-сообщения: фото/видео)
+            try:
+                already_taken_suffix = "\n\n👨‍🔧 <b>Заявка уже в работе</b>"
+                if callback.message.caption is not None:
+                    await callback.message.edit_caption(
+                        caption=(callback.message.caption or '') + already_taken_suffix
+                    )
+                else:
+                    await callback.message.edit_text(
+                        callback.message.html_text + already_taken_suffix
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось обновить сообщение о занятой заявке #{ticket_id}: {e}")
         return
 
     # Удаляем уведомления об этой заявке у других инженеров
