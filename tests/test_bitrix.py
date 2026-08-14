@@ -234,15 +234,19 @@ class TestSendMessageToChat:
              patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"):
             assert await bitrix.send_message_to_chat("hello") is False
 
-    async def test_sender_maps_to_user_id_param(self, mock_session):
-        """Отправитель должен передаваться в параметре USER_ID, а не FROM_USER_ID."""
+    async def test_payload_uses_dialog_id_only(self, mock_session):
+        """Сообщение идёт в чат через DIALOG_ID; отправитель (USER_ID/FROM_USER_ID) не передаётся.
+
+        USER_ID у im.message.add означает получателя (личный диалог), а не отправителя,
+        поэтому его передавать нельзя — иначе сообщение уйдёт в личку вместо чата.
+        """
         mock_session.add_response({"result": True})
         with patch.object(bitrix, "BITRIX_CHAT_ID", "chat123"), \
-             patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"), \
-             patch.object(bitrix, "BITRIX_FROM_USER_ID", "78"):
+             patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"):
             assert await bitrix.send_message_to_chat("hello") is True
             payload = mock_session.post_calls[0][1]["json"]
-            assert payload["USER_ID"] == 78
+            assert payload["DIALOG_ID"] == "chat123"
+            assert "USER_ID" not in payload
             assert "FROM_USER_ID" not in payload
 
 

@@ -15,7 +15,6 @@ from aiohttp import ClientSession, FormData
 from bot.config import (
     BITRIX_CHAT_ID,
     BITRIX_DISK_FOLDER_ID,
-    BITRIX_FROM_USER_ID,
     BITRIX_TASK_DEADLINE_HOURS,
     BITRIX_TASK_PRIORITY,
     BITRIX_WEBHOOK_URL,
@@ -258,18 +257,12 @@ async def send_message_to_chat(text: str, chat_id: int | None = None) -> bool:
         return False
 
     url = f"{BITRIX_WEBHOOK_URL.rstrip('/')}/im.message.add.json"
-    payload = {"DIALOG_ID": target_chat, "MESSAGE": text}
-    # Отправляем от имени указанного пользователя, если он задан.
-    # ВАЖНО: im.message.add принимает параметр USER_ID (а не FROM_USER_ID).
-    # FROM_USER_ID Битрикс24 игнорирует — сообщение уходит от владельца вебхука,
-    # который может не состоять в целевом чате, из-за чего уведомление не доходит.
-    if BITRIX_FROM_USER_ID:
-        try:
-            payload["USER_ID"] = int(BITRIX_FROM_USER_ID)
-        except ValueError:
-            logger.warning(f"Некорректное значение BITRIX_FROM_USER_ID: {BITRIX_FROM_USER_ID}")
-    # SYSTEM=Y позволяет отправлять сообщения от имени системы (бота) без участия в чате
-    payload["SYSTEM"] = "Y"
+    # ВАЖНО: у im.message.add нет параметра «отправить от имени другого пользователя» —
+    # сообщение всегда уходит от владельца вебхука. Параметр USER_ID у этого метода
+    # означает ПОЛУЧАТЕЛЯ (личный диалог), поэтому его передавать нельзя: сообщение
+    # уйдёт в личку пользователю вместо чата. DIALOG_ID=chat{ID} адресует групповой чат.
+    # SYSTEM=Y делает сообщение системным (автор 0) — как исторически у бота.
+    payload = {"DIALOG_ID": target_chat, "MESSAGE": text, "SYSTEM": "Y"}
 
     try:
         resp, data = await _post_with_retry(url, json=payload, timeout=15)

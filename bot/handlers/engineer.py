@@ -111,8 +111,8 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
             if not sent:
                 logger.warning(
                     f"Не удалось отправить уведомление в чат Битрикс24 о заявке #{ticket_id} "
-                    f"(send_message_to_chat вернул False — проверьте BITRIX_CHAT_ID, "
-                    f"BITRIX_FROM_USER_ID и членство пользователя в чате)."
+                    f"(send_message_to_chat вернул False — проверьте BITRIX_CHAT_ID "
+                    f"и членство владельца вебхука в чате)."
                 )
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление в чат Битрикс24 о заявке #{ticket_id}: {e}")
