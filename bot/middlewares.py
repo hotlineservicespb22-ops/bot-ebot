@@ -45,10 +45,14 @@ class ThrottlingMiddleware(BaseMiddleware):
     Ограничивает частоту callback-запросов (защита от двойных нажатий кнопок).
     Текстовые сообщения НЕ троттлятся, чтобы не терять переписку клиент↔инженер.
     """
-    def __init__(self, interval: float = 0.5):
+    def __init__(self, interval: float = 0.5, ttl: float = 3600.0):
         super().__init__()
         self.interval = interval
-        self.last_time: dict[int, float] = {}
+        # TTL (секунды): записи старше этого значения считаются устаревшими
+        # и удаляются, чтобы словарь не рос бесконечно.
+        self.ttl = ttl
+        # user_id -> (последнее время, время вставки)
+        self.last_time: dict[int, tuple[float, float]] = {}
 
     async def __call__(
         self,
@@ -66,9 +70,16 @@ class ThrottlingMiddleware(BaseMiddleware):
 
         user_id = user.id
         now = time.monotonic()
-        last = self.last_time.get(user_id, 0.0)
+
+        # Периодическая очистка устаревших записей (когда словарь слишком разросся)
+        if len(self.last_time) > 1000:
+            stale = [uid for uid, (_, inserted) in self.last_time.items() if now - inserted > self.ttl]
+            for uid in stale:
+                self.last_time.pop(uid, None)
+
+        last = self.last_time.get(user_id, (0.0, 0.0))[0]
         if now - last < self.interval:
             # Слишком часто — игнорируем повторное нажатие кнопки
             return
-        self.last_time[user_id] = now
+        self.last_time[user_id] = (now, now)
         return await handler(event, data)

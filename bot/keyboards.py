@@ -12,10 +12,16 @@ from aiogram.types import (
 class TicketCallback(CallbackData, prefix="ticket"):
     action: str
     ticket_id: int
+    page: int = 0
 
 class RatingCallback(CallbackData, prefix="rating"):
     ticket_id: int
     value: int
+
+class FaqCallback(CallbackData, prefix="faq"):
+    action: str
+    section_id: str = ""
+    question_id: int = 0
 
 def main_menu():
     """Reply-клавиатура для клиента в главном меню."""
@@ -134,16 +140,45 @@ def engineer_redirect_kb(ticket_id: int):
         ]]
     )
 
-def engineer_list_kb(tickets, mode: str):
-    """Inline keyboard to list tickets with 'view' action for details/navigation."""
+# Сколько заявок показывать на одной странице списка
+TICKETS_PER_PAGE = 10
+
+def engineer_list_kb(tickets, mode: str, page: int = 0, per_page: int = TICKETS_PER_PAGE):
+    """Inline keyboard to list tickets with 'view' action, with pagination."""
+    total = len(tickets)
+    start = page * per_page
+    end = min(total, start + per_page)
+    page_tickets = tickets[start:end]
+
     keyboard = []
-    for ticket in tickets:
+    for ticket in page_tickets:
         keyboard.append([
             InlineKeyboardButton(
                 text=f"🎫 Заявка #{ticket['id']} ({ticket['company_city'] or '—'})",
                 callback_data=TicketCallback(action="view", ticket_id=ticket['id']).pack()
             )
         ])
+
+    # Кнопки пагинации (◀️/▶️ между страницами)
+    max_page = max(0, (total - 1) // per_page) if total else 0
+    if max_page > 0:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="⬅️",
+                callback_data=TicketCallback(action="page", ticket_id=0, page=page - 1).pack()
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{max_page + 1}",
+            callback_data="ticket:noop"
+        ))
+        if page < max_page:
+            nav.append(InlineKeyboardButton(
+                text="➡️",
+                callback_data=TicketCallback(action="page", ticket_id=0, page=page + 1).pack()
+            ))
+        keyboard.append(nav)
+
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def engineer_detail_kb(ticket_id: int, mode: str, index: int, total: int):
@@ -217,6 +252,64 @@ def rating_kb(ticket_id: int):
     ]
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
+# ─── FAQ ────────────────────────────────────────────────────────────────
+# Разделы FAQ и ответы на вопросы вынесены в модуль bot/faq.py,
+# чтобы держать данные отдельно от клавиатур и обработчиков.
+from bot.faq import FAQ_SECTIONS  # noqa: E402
+
+def faq_main_kb():
+    """Клавиатура с разделами FAQ (главное меню FAQ)."""
+    keyboard = [
+        [InlineKeyboardButton(
+            text=section["title"],
+            callback_data=FaqCallback(action="section", section_id=section["id"]).pack()
+        )]
+        for section in FAQ_SECTIONS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def faq_section_kb(section_id: str):
+    """Клавиатура со списком вопросов выбранного раздела + кнопка 'Назад'."""
+    section = next((s for s in FAQ_SECTIONS if s["id"] == section_id), None)
+    if not section:
+        return faq_main_kb()
+    keyboard = [
+        [InlineKeyboardButton(
+            text=f"{idx}. {title}",
+            callback_data=FaqCallback(action="answer", section_id=section_id, question_id=qid).pack()
+        )]
+        for idx, (qid, title) in enumerate(section["questions"], start=1)
+    ]
+    keyboard.append([
+        InlineKeyboardButton(
+            text="🔙 Назад к разделам",
+            callback_data=FaqCallback(action="main").pack()
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def faq_answer_kb(section_id: str, question_id: int):
+    """Клавиатура под ответом: 'Назад к списку вопросов' и 'Назад к разделам'."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад к списку",
+                    callback_data=FaqCallback(action="section", section_id=section_id, question_id=question_id).pack()
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 К разделам FAQ",
+                    callback_data=FaqCallback(action="main").pack()
+                )
+            ]
+        ]
+    )
+
+class MyRequestsCallback(CallbackData, prefix="myreq"):
+    page: int
+
 class AdminCallback(CallbackData, prefix="admin"):
     action: str
     engineer_id: int = 0
@@ -262,3 +355,30 @@ def back_to_admin_kb():
             )
         ]]
     )
+
+
+def my_requests_pagination_kb(page: int, total_pages: int):
+    """
+    Inline-клавиатура пагинации истории заявок клиента.
+    Показывает страницы «◀️ N/M ▶️» (клик по текущей странице — no-op).
+    """
+    keyboard = []
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="⬅️",
+                callback_data=MyRequestsCallback(page=page - 1).pack()
+            ))
+        # Кнопка-счётчик (no-op) с текущей страницей
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="myreq:noop"
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="➡️",
+                callback_data=MyRequestsCallback(page=page + 1).pack()
+            ))
+        keyboard.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)

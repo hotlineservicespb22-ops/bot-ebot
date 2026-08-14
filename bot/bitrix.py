@@ -14,7 +14,6 @@ from aiohttp import ClientSession, FormData
 
 from bot.config import (
     BITRIX_CHAT_ID,
-    BITRIX_CREATED_BY,
     BITRIX_DISK_FOLDER_ID,
     BITRIX_FROM_USER_ID,
     BITRIX_TASK_DEADLINE_HOURS,
@@ -324,8 +323,10 @@ async def create_task(
     # Преобразуем HTML в BBCode для корректного отображения жирного текста в Битрикс24
     description = description.replace('<b>', '[B]').replace('</b>', '[/B]')
 
-    # Постановщик задачи: аргумент > конфигурация (BITRIX_CREATED_BY) > жёстко заданный ID 414
-    task_created_by = created_by or BITRIX_CREATED_BY or 414
+    # Постановщик задачи: жёстко заданный ID 414 (бизнес-требование).
+    # Аргумент и конфигурация BITRIX_CREATED_BY больше не влияют — постановщик
+    # всегда 414, чтобы задачи создавались от нужного пользователя Битрикс24.
+    task_created_by = 414
 
     fields = {
         "TITLE": title,
@@ -333,9 +334,8 @@ async def create_task(
         "RESPONSIBLE_ID": responsible_id,
         "PRIORITY": task_priority,
         "TAGS": ["Бот-Телеграм"],   # Тег задачи (массив строк)
+        "CREATED_BY": task_created_by,
     }
-    if task_created_by:
-        fields["CREATED_BY"] = task_created_by
     if task_deadline:
         fields["DEADLINE"] = task_deadline
     if uf_files:

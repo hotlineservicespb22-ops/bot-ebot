@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import mimetypes
 import os
@@ -18,6 +19,22 @@ MEDIA_EXTENSIONS = {
     'audio': '.mp3',
     'animation': '.gif',
     'sticker': '.webp',
+}
+
+# Whitelist безопасных расширений файлов (защита от загрузки исполняемых файлов).
+# Если расширение файла не в списке — используется расширение по умолчанию для типа медиа.
+ALLOWED_EXTENSIONS = {
+    # Изображения
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif',
+    # Видео
+    '.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp',
+    # Аудио
+    '.mp3', '.ogg', '.wav', '.m4a', '.aac', '.opus',
+    # Документы
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.txt', '.csv', '.rtf', '.odt', '.ods', '.odp',
+    # Архивы (могут потребоваться для логов/конфигов станков)
+    '.zip', '.rar', '.7z', '.tar', '.gz',
 }
 
 # Максимальная длина имени файла (без расширения), чтобы не превышать лимиты ФС
@@ -48,16 +65,30 @@ def sanitize_filename(name: str) -> str:
 
 
 def _guess_extension(file_name: str | None, mime_type: str | None, media_type: str) -> str:
-    """Определяет расширение файла по имени, MIME-типу или типу медиа."""
+    """Определяет расширение файла по имени, MIME-типу или типу медиа.
+
+    Безопасность: расширение проверяется по whitelist (ALLOWED_EXTENSIONS).
+    Если расширение не в списке — используется расширение по умолчанию для типа медиа.
+    Это защищает от сохранения исполняемых файлов (.exe, .php, .sh и т.д.).
+    """
+    default_ext = MEDIA_EXTENSIONS.get(media_type, '')
+
     if file_name:
-        ext = os.path.splitext(file_name)[1]
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext and ext in ALLOWED_EXTENSIONS:
+            return ext
+        # Расширение не в whitelist — используем безопасное по умолчанию
         if ext:
-            return ext.lower()
+            logger.warning(
+                f"Расширение '{ext}' не в whitelist — заменено на '{default_ext or 'без расширения'}'"
+            )
+
     if mime_type:
         ext = mimetypes.guess_extension(mime_type)
-        if ext:
-            return ext
-    return MEDIA_EXTENSIONS.get(media_type, '')
+        if ext and ext.lower() in ALLOWED_EXTENSIONS:
+            return ext.lower()
+
+    return default_ext
 
 
 def next_file_number(ticket_id: int) -> int:
@@ -105,8 +136,9 @@ async def save_media_file(
         file_name = file_name or base_name
         ext = _guess_extension(file_name, mime_type, media_type)
 
-        # Уникальный порядковый номер файла
-        num = next_file_number(ticket_id)
+        # Уникальный порядковый номер файла (вычисление в отдельном потоке,
+        # чтобы не блокировать event loop на операциях с ФС)
+        num = await asyncio.to_thread(next_file_number, ticket_id)
         safe_name = sanitize_filename(file_name)
         if not safe_name and not ext:
             safe_name = f"file{ext}"
@@ -118,7 +150,7 @@ async def save_media_file(
         # Имя: 001_исходное_имя.расширение (или 001_media_type.расширение)
         stored_name = f"{num:03d}_{safe_name}{ext}"
 
-        ticket_dir = ensure_ticket_dir(ticket_id)
+        ticket_dir = await asyncio.to_thread(ensure_ticket_dir, ticket_id)
         dest_path = os.path.join(ticket_dir, stored_name)
 
         # Скачиваем файл

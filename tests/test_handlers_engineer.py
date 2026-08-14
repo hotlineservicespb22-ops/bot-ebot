@@ -19,6 +19,7 @@ from conftest import make_message
 from bot.handlers.engineer import (
     _create_bitrix_task_for_ticket,
     _delete_ticket_notifications,
+    _send_pre_assign_client_messages,
     cancel_current_ticket_via_menu,
     cancel_ticket_by_engineer,
     complete_current_ticket_via_menu,
@@ -401,6 +402,92 @@ class TestCancelViaMenu:
 
 
 # ===================== Тесты вспомогательных функций =====================
+
+class TestSendPreAssignClientMessages:
+    """Тесты для _send_pre_assign_client_messages (передача уточнений клиента инженеру)."""
+
+    async def test_sends_media_without_text_messages(
+        self, db, fake_user, fake_engineer_user, mock_bot, tmp_path
+    ):
+        """Медиа передаются инженеру, даже если нет текстовых сообщений в messages.
+
+        Воспроизводит баг: при отсутствии записей в messages функция выходила
+        через `if not client_msgs: return` и не доходила до отправки медиафайлов.
+        """
+        # Создаём заявку с фото ошибки (machine_media_id не задан)
+        ticket_id = await db.create_ticket(
+            client_id=fake_user.id,
+            client_name="Клиент Тест",
+            company="", equipment_type="", brand="", cnc_model="",
+            problem="Ошибка",
+            media_id=None, city="", inn_contract="", contact="+7999",
+            machine_info="Станок",
+            company_city="Москва",
+        )
+        # Сохраняем медиафайл (фото ошибки). В messages записей НЕТ (как при создании заявки
+        # через FSM). Это ключевое условие бага.
+        media_photo_path = tmp_path / "photo_error.jpg"
+        media_photo_path.write_bytes(b"fake_image_data")
+        await db.save_media(
+            ticket_id=ticket_id,
+            file_id="error_photo_file_id",
+            file_type="photo",
+            file_path=str(media_photo_path),
+            sender_id=fake_user.id,
+            sender_role="client",
+        )
+
+        await _send_pre_assign_client_messages(mock_bot, db, ticket_id, fake_engineer_user.id)
+
+        # В отсутствие текстовых сообщений функция всё равно должна отправить медиа
+        assert mock_bot.send_photo.called
+
+    async def test_skips_machine_media_duplicate(
+        self, db, fake_user, fake_engineer_user, mock_bot, tmp_path
+    ):
+        """Медиа шильды (machine_media_id) не дублируется в пересылке.
+
+        Фото/видео шильды уже отправляется инженеру отдельно в take_ticket,
+        поэтому в _send_pre_assign_client_messages оно должно быть пропущено.
+        """
+        ticket_id = await db.create_ticket(
+            client_id=fake_user.id,
+            client_name="Клиент Тест",
+            company="", equipment_type="", brand="", cnc_model="",
+            problem="Ошибка",
+            media_id=None, city="", inn_contract="", contact="+7999",
+            machine_info="Станок",
+            company_city="Москва",
+            machine_media_id="shilda_file_id",
+        )
+        # Медиа шильды (совпадает с machine_media_id заявки)
+        shilda_path = tmp_path / "shilda.jpg"
+        shilda_path.write_bytes(b"shilda_data")
+        await db.save_media(
+            ticket_id=ticket_id,
+            file_id="shilda_file_id",
+            file_type="photo",
+            file_path=str(shilda_path),
+            sender_id=fake_user.id,
+            sender_role="client",
+        )
+        # Медиа ошибки
+        error_path = tmp_path / "error.jpg"
+        error_path.write_bytes(b"error_data")
+        await db.save_media(
+            ticket_id=ticket_id,
+            file_id="error_photo_file_id",
+            file_type="photo",
+            file_path=str(error_path),
+            sender_id=fake_user.id,
+            sender_role="client",
+        )
+
+        await _send_pre_assign_client_messages(mock_bot, db, ticket_id, fake_engineer_user.id)
+
+        # Отправлено только 1 фото (ошибки), шильда пропущена
+        assert mock_bot.send_photo.call_count == 1
+
 
 class TestDeleteTicketNotifications:
     """Тесты для _delete_ticket_notifications."""

@@ -19,10 +19,13 @@ from conftest import make_message
 
 from bot.handlers.client import (
     TicketForm,
+    _last_ticket_start,
     cancel_ticket_by_client,
+    check_fsm_expired,
     cmd_cancel,
     cmd_help,
     cmd_start,
+    faq_callback_handler,
     my_requests,
     process_rating,
     save_rating_comment,
@@ -33,7 +36,7 @@ from bot.handlers.client import (
     ticket_machine_info,
     ticket_problem_media,
 )
-from bot.keyboards import RatingCallback
+from bot.keyboards import FaqCallback, RatingCallback
 
 # ===================== Вспомогательные фикстуры =====================
 
@@ -129,16 +132,70 @@ class TestCmdCancel:
 class TestShowFaq:
     """Тесты для FAQ."""
 
-    async def test_faq_content(self, fake_user, fake_chat):
-        """Проверяет содержимое FAQ."""
+    async def test_faq_content(self, fake_user, fake_chat, client_fsm_context):
+        """Проверяет содержимое FAQ и наличие кнопок-разделов."""
         message = make_message(fake_user, fake_chat, text="❓ Частые вопросы")
-        await show_faq(message)
+        await show_faq(message, client_fsm_context)
         message.answer.assert_called_once()
         call_args = message.answer.call_args
         text = call_args[0][0]
         assert "Часто задаваемые вопросы" in text
         assert "8 800 777-38-56" in text
+        # Должна быть клавиатура с разделами
+        assert call_args[1]["reply_markup"] is not None
+
+
+class TestFaqCallback:
+    """Тесты для callback-обработчика FAQ."""
+
+    def _make_callback(self):
+        callback = AsyncMock()
+        callback.message = AsyncMock()
+        return callback
+
+    async def test_faq_main(self, fake_user):
+        """Проверяет возврат к списку разделов."""
+        callback = self._make_callback()
+        callback_data = FaqCallback(action="main")
+        await faq_callback_handler(callback, callback_data)
+        callback.answer.assert_called_once()
+        callback.message.edit_text.assert_called_once()
+        text = callback.message.edit_text.call_args[0][0]
+        assert "Часто задаваемые вопросы" in text
+
+    async def test_faq_section(self, fake_user):
+        """Проверяет открытие списка вопросов раздела."""
+        callback = self._make_callback()
+        callback_data = FaqCallback(action="section", section_id="equipment")
+        await faq_callback_handler(callback, callback_data)
+        callback.answer.assert_called_once()
+        callback.message.edit_text.assert_called_once()
+        text = callback.message.edit_text.call_args[0][0]
+        assert "Оборудование" in text
+
+    async def test_faq_section_not_found(self, fake_user):
+        """Проверяет открытие несуществующего раздела."""
+        callback = self._make_callback()
+        callback_data = FaqCallback(action="section", section_id="nonexistent")
+        await faq_callback_handler(callback, callback_data)
+        callback.answer.assert_called_with("Раздел не найден.", show_alert=True)
+
+    async def test_faq_answer(self, fake_user):
+        """Проверяет показ ответа на выбранный вопрос."""
+        callback = self._make_callback()
+        callback_data = FaqCallback(action="answer", section_id="equipment", question_id=1)
+        await faq_callback_handler(callback, callback_data)
+        callback.answer.assert_called_once()
+        callback.message.edit_text.assert_called_once()
+        text = callback.message.edit_text.call_args[0][0]
         assert "чиллер" in text.lower()
+
+    async def test_faq_answer_not_found(self, fake_user):
+        """Проверяет ответ на несуществующий вопрос."""
+        callback = self._make_callback()
+        callback_data = FaqCallback(action="answer", section_id="equipment", question_id=999)
+        await faq_callback_handler(callback, callback_data)
+        callback.answer.assert_called_with("Вопрос не найден.", show_alert=True)
 
 
 # ===================== Тесты FSM-воронки создания заявки =====================
@@ -150,6 +207,7 @@ class TestTicketFormFSM:
         self, fake_user, fake_chat, db, client_fsm_context, mock_bot
     ):
         """Проверяет начало создания заявки при отсутствии активной."""
+        _last_ticket_start.clear()  # Сбрасываем антиспам между тестами
         message = make_message(fake_user, fake_chat, text="🛠 Оставить заявку на сервис ЧПУ")
         await start_ticket(message, client_fsm_context, mock_bot, db)
 
@@ -160,6 +218,7 @@ class TestTicketFormFSM:
         self, fake_user, fake_chat, db, client_fsm_context, mock_bot
     ):
         """Проверяет попытку создать заявку при наличии активной."""
+        _last_ticket_start.clear()  # Сбрасываем антиспам между тестами
         # Создаём активную заявку
         await db.create_ticket(
             client_id=fake_user.id,
@@ -184,6 +243,22 @@ class TestTicketFormFSM:
         message.answer.assert_called_once()
         call_args = message.answer.call_args
         assert "уже есть активная заявка" in call_args[0][0]
+
+    async def test_start_ticket_anti_spam_cooldown(
+        self, fake_user, fake_chat, db, client_fsm_context, mock_bot
+    ):
+        """Проверяет, что повторная попытка в течение кулдауна блокируется."""
+        import time as _time
+        _last_ticket_start.clear()
+        _last_ticket_start[fake_user.id] = _time.monotonic()  # "только что" создал заявку
+        message = make_message(fake_user, fake_chat, text="🛠 Оставить заявку на сервис ЧПУ")
+        await start_ticket(message, client_fsm_context, mock_bot, db)
+
+        # Состояние не должно измениться (антиспам сработал раньше)
+        assert await client_fsm_context.get_state() is None
+        message.answer.assert_called_once()
+        call_args = message.answer.call_args
+        assert "Не так быстро" in call_args[0][0]
 
     async def test_problem_media_valid_text(
         self, fake_user, fake_chat, client_fsm_context, mock_bot
@@ -367,6 +442,48 @@ class TestTicketFormFSM:
 
         # Состояние не должно измениться
         assert await client_fsm_context.get_state() == TicketForm.contact.state
+
+
+# ===================== Тесты таймаута FSM =====================
+
+class TestCheckFsmExpired:
+    """Тесты для автоматического сброса воронки по таймауту."""
+
+    async def test_not_expired_returns_false(self, fake_user, fake_chat, client_fsm_context, db):
+        """Проверяет, что свежая воронка не сбрасывается."""
+        from datetime import datetime, timezone
+
+        await client_fsm_context.update_data(
+            fsm_started_at=datetime.now(timezone.utc).isoformat()
+        )
+        message = make_message(fake_user, fake_chat, text="Описание проблемы")
+        result = await check_fsm_expired(message, client_fsm_context)
+        assert result is False
+
+    async def test_expired_returns_true_and_clears(self, fake_user, fake_chat, client_fsm_context, db):
+        """Проверяет, что просроченная воронка сбрасывается."""
+        from datetime import datetime, timedelta, timezone
+
+        # Время старта — позади таймаута (FSM_TIMEOUT по умолчанию 1800 сек)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=99999)
+        await client_fsm_context.update_data(
+            fsm_started_at=old_time.isoformat()
+        )
+        message = make_message(fake_user, fake_chat, text="Описание проблемы")
+        result = await check_fsm_expired(message, client_fsm_context)
+        assert result is True
+        # Состояние должно быть очищено
+        assert await client_fsm_context.get_state() is None
+        # Клиент должен получить уведомление об истечении
+        message.answer.assert_called_once()
+        call_args = message.answer.call_args
+        assert "истекло" in call_args[0][0].lower()
+
+    async def test_no_started_at_returns_false(self, fake_user, fake_chat, client_fsm_context, db):
+        """Проверяет, что отсутствие метки времени не приводит к сбросу."""
+        message = make_message(fake_user, fake_chat, text="Описание проблемы")
+        result = await check_fsm_expired(message, client_fsm_context)
+        assert result is False
 
 
 # ===================== Тесты отмены заявки клиентом =====================

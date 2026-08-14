@@ -11,6 +11,8 @@ from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 from bot.keyboards import (
     AdminCallback,
+    FAQ_SECTIONS,
+    FaqCallback,
     RatingCallback,
     TicketCallback,
     active_ticket_menu_kb,
@@ -27,6 +29,9 @@ from bot.keyboards import (
     engineer_redirect_kb,
     engineer_select_client_kb,
     engineer_ticket_control_kb,
+    faq_answer_kb,
+    faq_main_kb,
+    faq_section_kb,
     main_menu,
     rating_kb,
     ticket_action_kb,
@@ -37,16 +42,17 @@ class TestCallbackData:
     """Тесты для CallbackData классов."""
 
     def test_ticket_callback_pack(self):
-        """Проверяет упаковку TicketCallback."""
+        """Проверяет упаковку TicketCallback (включая поле page)."""
         cb = TicketCallback(action="take", ticket_id=42)
         packed = cb.pack()
-        assert packed == "ticket:take:42"
+        assert packed == "ticket:take:42:0"
 
     def test_ticket_callback_unpack(self):
         """Проверяет распаковку TicketCallback."""
-        cb = TicketCallback.unpack("ticket:complete:123")
+        cb = TicketCallback.unpack("ticket:complete:123:0")
         assert cb.action == "complete"
         assert cb.ticket_id == 123
+        assert cb.page == 0
 
     def test_rating_callback_pack(self):
         """Проверяет упаковку RatingCallback."""
@@ -254,6 +260,61 @@ class TestInlineKeyboards:
         for i, button in enumerate(row, start=1):
             assert button.text == f"{i}⭐"
             assert f"rating:42:{i}" in button.callback_data
+
+    def test_faq_main_kb(self):
+        """Проверяет главное меню FAQ с разделами."""
+        kb = faq_main_kb()
+        assert isinstance(kb, InlineKeyboardMarkup)
+        assert len(kb.inline_keyboard) == len(FAQ_SECTIONS)
+        # Каждая кнопка — раздел
+        for i, section in enumerate(FAQ_SECTIONS):
+            button = kb.inline_keyboard[i][0]
+            assert button.text == section["title"]
+            assert f"faq:section:{section['id']}:" in button.callback_data
+
+    def test_faq_section_kb(self):
+        """Проверяет список вопросов раздела + кнопку 'Назад'."""
+        kb = faq_section_kb("equipment")
+        assert isinstance(kb, InlineKeyboardMarkup)
+        # Вопросы + кнопка назад
+        equipment = next(s for s in FAQ_SECTIONS if s["id"] == "equipment")
+        assert len(kb.inline_keyboard) == len(equipment["questions"]) + 1
+        # Кнопка назад
+        back_btn = kb.inline_keyboard[-1][0]
+        assert back_btn.text == "🔙 Назад к разделам"
+        assert "faq:main:" in back_btn.callback_data
+
+    def test_faq_section_kb_unknown_returns_main(self):
+        """Проверяет, что неизвестный раздел возвращает главное меню."""
+        kb = faq_section_kb("nonexistent")
+        assert len(kb.inline_keyboard) == len(FAQ_SECTIONS)
+
+    def test_faq_answer_kb(self):
+        """Проверяет клавиатуру под ответом: 'Назад к списку' и 'К разделам'."""
+        kb = faq_answer_kb(section_id="equipment", question_id=1)
+        assert isinstance(kb, InlineKeyboardMarkup)
+        assert len(kb.inline_keyboard) == 2
+        # Кнопка назад к списку
+        back_list = kb.inline_keyboard[0][0]
+        assert back_list.text == "🔙 Назад к списку"
+        assert "faq:section:equipment:1" in back_list.callback_data
+        # Кнопка к разделам
+        back_main = kb.inline_keyboard[1][0]
+        assert back_main.text == "🏠 К разделам FAQ"
+        assert "faq:main:" in back_main.callback_data
+
+    def test_faq_callback_pack(self):
+        """Проверяет упаковку FaqCallback."""
+        cb = FaqCallback(action="answer", section_id="equipment", question_id=5)
+        packed = cb.pack()
+        assert packed == "faq:answer:equipment:5"
+
+    def test_faq_callback_unpack(self):
+        """Проверяет распаковку FaqCallback."""
+        cb = FaqCallback.unpack("faq:main::0")
+        assert cb.action == "main"
+        assert cb.section_id == ""
+        assert cb.question_id == 0
 
 
 class TestAdminKeyboards:

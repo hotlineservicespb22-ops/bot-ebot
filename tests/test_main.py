@@ -16,6 +16,7 @@ from bot.main import (
     error_handler,
     get_all_admin_ids,
     get_storage,
+    main,
     setup_commands,
     ticket_timeout_watcher,
 )
@@ -129,10 +130,117 @@ class TestTicketTimeoutWatcher:
             "contact": "+7999",
         }
 
+        # Мокаем метод с дедупликацией и прерываем после одного прохода
         with patch("bot.main.ADMIN_IDS", [123456789]), \
-             patch.object(db, "get_expired_open_tickets", new=AsyncMock(return_value=[expired_ticket])), \
+             patch.object(db, "get_expired_open_tickets_not_escalated", new=AsyncMock(return_value=[expired_ticket])), \
+             patch.object(db, "mark_ticket_escalated", new=AsyncMock()) as mock_escalate, \
              patch("bot.main.TICKET_TIMEOUT", 5), \
              patch("asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
             with pytest.raises(asyncio.CancelledError):
                 await ticket_timeout_watcher(mock_bot, db)
+            # Уведомление отправлено
             mock_bot.send_message.assert_awaited()
+            # И заявка помечена как эскалированная (дедупликация)
+            mock_escalate.assert_awaited_once_with(ticket_id)
+
+    async def test_does_not_re_notify_already_escalated(self, mock_bot, db):
+        """Проверяет, что уже эскалированные заявки не уведомляются повторно."""
+        with patch("bot.main.ADMIN_IDS", [123456789]), \
+             patch.object(db, "get_expired_open_tickets_not_escalated", new=AsyncMock(return_value=[])), \
+             patch("bot.main.TICKET_TIMEOUT", 5), \
+             patch("asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with pytest.raises(asyncio.CancelledError):
+                await ticket_timeout_watcher(mock_bot, db)
+            mock_bot.send_message.assert_not_awaited()
+
+
+class TestErrorHandlerWithTraceback:
+    async def test_sends_error_with_traceback(self, mock_bot, db):
+        """Проверяет формирование traceback в уведомлении об ошибке."""
+        from aiogram.types import ErrorEvent
+
+        error_event = MagicMock(spec=ErrorEvent)
+        try:
+            raise ValueError("тестовая ошибка")
+        except ValueError as exc:
+            error_event.exception = exc
+
+        with patch("bot.main.ADMIN_IDS", [123456789]):
+            await error_handler(error_event, mock_bot, db)
+            mock_bot.send_message.assert_awaited()
+            sent_text = mock_bot.send_message.call_args[0][1]
+            assert "ValueError" in sent_text  # тип ошибки в HTML-тегах <code>
+            assert "Критическая ошибка" in sent_text
+
+
+class TestMainWebhook:
+    async def test_webhook_branch_runs(self):
+        """Проверяет, что webhook-ветка main() запускает aiohttp-сервер."""
+        # Мокаем DB
+        mock_db = AsyncMock()
+        mock_db.connect = AsyncMock()
+        mock_db.init_db = AsyncMock()
+        mock_db.migrate = AsyncMock()
+        mock_db.close = AsyncMock()
+        mock_db.get_admins = AsyncMock(return_value=[])
+
+        # Мокаем Bot и Dispatcher
+        mock_bot = AsyncMock()
+        mock_bot.set_webhook = AsyncMock()
+        mock_bot.delete_webhook = AsyncMock()
+        mock_bot.session = AsyncMock()
+        mock_bot.session.close = AsyncMock()
+
+        mock_dp = AsyncMock()
+        mock_dp.start_polling = AsyncMock()
+        # dp.error() используется как декоратор — должен возвращать callable-декоратор
+        mock_dp.error = MagicMock(return_value=lambda f: f)
+        # update.middleware / include_router — синхронные цепочки, не должны быть корутинами
+        mock_dp.update = MagicMock()
+        mock_dp.include_router = MagicMock()
+        mock_dp.update.middleware = MagicMock()
+
+        fake_event = asyncio.Event()
+        fake_event.wait = AsyncMock(side_effect=KeyboardInterrupt)
+
+        # Мокаем aiohttp-компоненты, чтобы не поднимать реальный сервер
+        mock_runner = AsyncMock()
+        mock_site = AsyncMock()
+        mock_site.start = AsyncMock()
+        mock_app = MagicMock()
+        mock_handler = MagicMock()
+
+        with patch("bot.main.Database", return_value=mock_db), \
+             patch("bot.main.Bot", return_value=mock_bot), \
+             patch("bot.main.Dispatcher", return_value=mock_dp), \
+             patch("bot.main.WEBHOOK_URL", "https://example.com"), \
+             patch("bot.main.WEBHOOK_PATH", "/webhook"), \
+             patch("bot.main.WEBHOOK_HOST", "0.0.0.0"), \
+             patch("bot.main.WEBHOOK_PORT", 8080), \
+             patch("bot.main.get_storage", return_value=MagicMock()), \
+             patch("bot.main.setup_commands", new=AsyncMock()), \
+             patch("bot.main.setup_logging", new=MagicMock()), \
+             patch("asyncio.Event", return_value=fake_event), \
+             patch("aiogram.webhook.aiohttp_server.SimpleRequestHandler", return_value=mock_handler), \
+             patch("aiogram.webhook.aiohttp_server.setup_application", return_value=None), \
+             patch("aiohttp.web.Application", return_value=mock_app), \
+             patch("aiohttp.web.AppRunner", return_value=mock_runner), \
+             patch("aiohttp.web.TCPSite", return_value=mock_site):
+            # Имитируем выход из цикла через KeyboardInterrupt после старта сайта
+            mock_runner.setup = AsyncMock()
+            mock_runner.start = AsyncMock()
+            mock_handler.register = MagicMock()
+
+            with patch("bot.main.shutdown", new=AsyncMock()):
+                # Основной цикл уйдёт в asyncio.Event().wait(), который сразу бросит KeyboardInterrupt
+                try:
+                    await main()
+                except KeyboardInterrupt:
+                    # Ожидаемое прерывание цикла webhook-сервера
+                    pass
+
+            mock_bot.set_webhook.assert_awaited_once()
+            mock_bot.delete_webhook.assert_awaited_once()
+            mock_site.start.assert_awaited_once()
+            mock_db.close.assert_awaited_once()
+            mock_bot.session.close.assert_awaited_once()

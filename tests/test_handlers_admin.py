@@ -351,10 +351,12 @@ class TestStats:
         assert "Всего заявок" in call_args[0][0]
 
     async def test_stats_not_admin(self, fake_user, fake_chat, db):
-        """Проверяет отказ в статистике для не-администратора."""
+        """Проверяет отказ в статистике для не-администратора (явная проверка через БД)."""
         message = make_message(fake_user, fake_chat, text="/stats")
         await cmd_stats(message, db, is_admin=False)
-        message.answer.assert_not_called()
+        # Теперь функция явно проверяет права через БД и отправляет сообщение об отказе
+        message.answer.assert_called_once()
+        assert "нет прав" in message.answer.call_args[0][0].lower()
 
 
 # ===================== Тесты экспорта CSV =====================
@@ -412,19 +414,28 @@ class TestGenerateCsv:
         assert b"ID" in result  # Заголовок
 
     def test_generate_csv_with_data(self):
-        """Проверяет генерацию CSV с заявками."""
+        """Проверяет генерацию CSV с заявками (все поля)."""
         tickets = [
             {
                 "id": 1,
                 "client_id": 123,
                 "client_name": "Клиент",
                 "company": "ООО Тест",
-                "cnc_model": "Wattsan",
+                "equipment_type": "лазер",
+                "brand": "Wattsan",
+                "cnc_model": "1610",
+                "machine_info": "Wattsan 1610",
+                "company_city": "Москва",
                 "problem": "Проблема",
+                "media_id": None,
+                "city": "Москва",
+                "inn_contract": "123",
                 "contact": "12345",
                 "status": "open",
                 "engineer_id": None,
                 "close_comment": None,
+                "created_at": "2026-01-01T10:00:00+00:00",
+                "closed_at": None,
             }
         ]
         result = generate_csv(tickets)

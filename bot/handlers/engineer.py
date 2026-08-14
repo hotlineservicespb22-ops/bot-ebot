@@ -1,23 +1,22 @@
 import html
 import logging
+import os
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from bot.bitrix import create_task, send_message_to_chat, upload_file_to_bitrix
-from bot.config import BITRIX_ATTACH_FILES
+from bot.config import BITRIX_ATTACH_FILES, BITRIX_PORTAL_URL
 from bot.database import Database
 from bot.keyboards import (
     TicketCallback,
     active_ticket_menu_kb,
     engineer_active_ticket_kb,
-    engineer_default_menu_kb,
-    engineer_select_client_kb,
     engineer_ticket_control_kb,
-    main_menu,
-    rating_kb,
 )
+from bot.services import cancel_ticket as cancel_ticket_service
+from bot.services import complete_ticket as complete_ticket_service
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,8 @@ router = Router()
 
 @router.callback_query(TicketCallback.filter(F.action == "take"))
 async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, is_engineer: bool, state: FSMContext):
-    if not is_engineer:
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_engineer(callback.from_user.id):
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
@@ -95,14 +95,17 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
                 engineer_mention = f"[USER={bitrix_engineer_id}]{engineer_name}[/USER]"
             else:
                 engineer_mention = html.escape(engineer_name)
-            # Ссылка на задачу в Битрикс24
-            task_url = f"https://crm.wattsan.ru/company/personal/user/{bitrix_engineer_id or ''}/tasks/task/view/{task_id}/"
+            # Ссылка на задачу в Битрикс24 (формируется из BITRIX_PORTAL_URL)
+            task_ref = f"Заявка #{task_id}"
+            if BITRIX_PORTAL_URL:
+                task_url = f"{BITRIX_PORTAL_URL}/company/personal/user/{bitrix_engineer_id or ''}/tasks/task/view/{task_id}/"
+                task_ref = f"[URL={task_url}]Заявка #{task_id}[/URL]"
             chat_msg = (
                 f"🚨 [B]{engineer_mention}[/B] взял заявку [B]#{ticket_id}[/B] в работу.\n\n"
                 f"🏢 [B]Компания/Город:[/B] {html.escape(str(ticket_dict.get('company_city') or '—'))}\n"
                 f"🔧 [B]Станок:[/B] {html.escape(str(ticket_dict.get('machine_info') or '—'))}\n"
                 f"📝 [B]Проблема:[/B] {html.escape(str(ticket_dict.get('problem') or '—'))}\n\n"
-                f"📌 [B]Задача:[/B] [URL={task_url}]Заявка #{task_id}[/URL]"
+                f"📌 [B]Задача:[/B] {task_ref}"
             )
             await send_message_to_chat(chat_msg)
         except Exception as e:
@@ -163,9 +166,71 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
         except Exception as e:
             logger.error(f"Не удалось отправить фото шильдика инженеру {callback.from_user.id} для заявки #{ticket_id}: {e}")
 
+    # Передаём инженеру уточнения клиента, отправленные до взятия заявки в работу
+    # (в период, когда заявка была в статусе 'open' и ещё не имела инженера).
+    await _send_pre_assign_client_messages(bot, db, ticket_id, callback.from_user.id)
+
+
+async def _send_pre_assign_client_messages(bot: Bot, db: Database, ticket_id: int, engineer_id: int):
+    """Отправляет инженеру уточнения клиента, накопленные до взятия заявки в работу."""
+    try:
+        messages = await db.get_messages_for_ticket(ticket_id)
+        # Только сообщения клиента (отправленные до назначения инженера)
+        client_msgs = [m for m in messages if m['sender_role'] == 'client']
+
+        # Текстовые уточнения отправляем только если они есть.
+        # Раньше был `if not client_msgs: return`, из-за чего при отсутствии
+        # текстовых сообщений пересылка медиа (фото/видео заявки) не выполнялась,
+        # и инженер не получал приложенные клиентом файлы.
+        if client_msgs:
+            await bot.send_message(
+                engineer_id,
+                f"📝 <b>Уточнения клиента по заявке #{ticket_id} до взятия в работу:</b>"
+            )
+            for m in client_msgs:
+                text = m['text'] or ''
+                media_type = m['media_type'] or ''
+                label = f"[{media_type}]" if media_type else ""
+                line = f"{text} {label}".strip()
+                if line:
+                    await bot.send_message(engineer_id, html.escape(line))
+
+        # Фото/видео шильдика станка уже отправляются инженеру отдельно в take_ticket
+        # (через machine_media_id) — исключаем дублирование при пересылке медиа.
+        ticket = await db.get_ticket(ticket_id)
+        machine_media_id = ticket['machine_media_id'] if ticket else None
+
+        # Отправляем медиафайлы, приложенные клиентом к уточнениям
+        media_rows = await db.get_media_for_ticket(ticket_id)
+        for media in media_rows:
+            # Пропускаем медиа, которое уже передаётся отдельно (фото/видео шильдика)
+            if machine_media_id and media['file_id'] == machine_media_id:
+                continue
+            if media['sender_role'] != 'client':
+                continue
+            file_path = media['file_path']
+            media_type = media['file_type']
+            # Отправляем из локального файла, если он сохранён
+            if file_path and os.path.isfile(file_path):
+                try:
+                    if media_type == 'photo':
+                        with open(file_path, 'rb') as f:
+                            await bot.send_photo(engineer_id, photo=BufferedInputFile(f.read(), filename=os.path.basename(file_path)))
+                    elif media_type == 'video':
+                        with open(file_path, 'rb') as f:
+                            await bot.send_video(engineer_id, video=BufferedInputFile(f.read(), filename=os.path.basename(file_path)))
+                    else:
+                        with open(file_path, 'rb') as f:
+                            await bot.send_document(engineer_id, document=BufferedInputFile(f.read(), filename=os.path.basename(file_path)))
+                except Exception as e:
+                    logger.warning(f"Не удалось переслать медиа клиента инженеру {engineer_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Не удалось передать уточнения клиента инженеру для заявки #{ticket_id}: {e}")
+
 @router.callback_query(TicketCallback.filter(F.action == "complete"))
 async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, state: FSMContext, is_engineer: bool):
-    if not is_engineer:
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_engineer(callback.from_user.id):
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
@@ -176,7 +241,15 @@ async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: Ti
         await callback.answer("Это не ваша заявка или она уже закрыта.", show_alert=True)
         return
 
-    await db.close_ticket(ticket_id, status='completed', comment='Работы успешно завершены инженером')
+    # Единая бизнес-логика завершения (статус, уведомление клиента, состояние FSM)
+    success = await complete_ticket_service(
+        bot, callback.message, db, state,
+        callback.from_user.id, ticket_id,
+        comment='Работы успешно завершены инженером',
+    )
+    if not success:
+        await callback.answer("Заявка не может быть завершена.", show_alert=True)
+        return
 
     # Обновляем сообщение о завершении заявки (учитываем медиа-сообщения)
     try:
@@ -189,32 +262,6 @@ async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: Ti
             await callback.message.edit_text(callback.message.html_text + completed_suffix)
     except Exception as e:
         logger.warning(f"Не удалось обновить сообщение о завершении заявки #{ticket_id}: {e}")
-
-    try:
-        await bot.send_message(
-            ticket['client_id'],
-            f"✅ Заявка #{ticket_id} успешно завершена специалистом. Спасибо за обращение!\n\nОцените, пожалуйста, качество обслуживания:",
-            reply_markup=rating_kb(ticket_id)
-        )
-    except Exception as e:
-        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о завершении заявки #{ticket_id}: {e}")
-
-    current_state_data = await state.get_data()
-    if current_state_data.get("active_ticket_id") == ticket_id:
-        await state.update_data(active_ticket_id=None)
-
-    remaining_tickets = await db.get_active_tickets_for_engineer(callback.from_user.id)
-    if remaining_tickets:
-        try:
-            await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets)) # Inline keyboard
-            await callback.message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb()) # Revert to default ReplyKeyboardMarkup
-        except Exception as e:
-            logger.warning(f"Не удалось отправить список оставшихся заявок инженеру {callback.from_user.id}: {e}")
-    else:
-        try:
-            await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
-        except Exception as e:
-            logger.warning(f"Не удалось отправить сообщение об отсутствии заявок инженеру {callback.from_user.id}: {e}")
 
 
 @router.message(F.text == "✅ Завершить текущую")
@@ -237,27 +284,15 @@ async def complete_current_ticket_via_menu(message: Message, bot: Bot, db: Datab
         await state.update_data(active_ticket_id=None)
         return
 
-    # Close the ticket
-    await db.close_ticket(active_ticket_id, status='completed', comment='Работы успешно завершены инженером через меню')
-
-    # Notify client
-    await bot.send_message(
-        ticket['client_id'],
-        f"✅ Заявка #{active_ticket_id} успешно завершена специалистом. Спасибо за обращение!\n\nОцените, пожалуйста, качество обслуживания:",
-        reply_markup=rating_kb(active_ticket_id) # Return client to main menu
+    # Единая бизнес-логика завершения
+    success = await complete_ticket_service(
+        bot, message, db, state, user_id, active_ticket_id,
+        comment='Работы успешно завершены инженером через меню',
     )
-
-    # Clear active ticket from engineer's state
-    await state.update_data(active_ticket_id=None)
-
-    await message.answer(f"✅ Заявка #{active_ticket_id} успешно завершена.")
-    # Optionally, suggest next steps or list remaining tickets
-    remaining_tickets = await db.get_active_tickets_for_engineer(user_id)
-    if remaining_tickets:
-        await message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets)) # Inline keyboard
-        await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb()) # Revert to default ReplyKeyboardMarkup
+    if success:
+        await message.answer(f"✅ Заявка #{active_ticket_id} успешно завершена.")
     else:
-        await message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+        await message.answer("Эта заявка не может быть завершена.")
 
 
 @router.message(F.text == "🚫 Отменить текущую")
@@ -280,31 +315,20 @@ async def cancel_current_ticket_via_menu(message: Message, bot: Bot, db: Databas
         await state.update_data(active_ticket_id=None)
         return
 
-    # Cancel the ticket
-    await db.close_ticket(active_ticket_id, status='canceled', comment='Отменено инженером через меню')
-
-    # Notify client
-    await bot.send_message(
-        ticket['client_id'],
-        f"🚫 Заявка #{active_ticket_id} была отменена инженером.",
-        reply_markup=main_menu() # Return client to main menu
+    # Единая бизнес-логика отмены
+    success = await cancel_ticket_service(
+        bot, message, db, state, user_id, active_ticket_id,
+        comment='Отменено инженером через меню',
     )
-
-    # Clear active ticket from engineer's state
-    await state.update_data(active_ticket_id=None)
-
-    await message.answer(f"🚫 Заявка #{active_ticket_id} отменена.")
-    # Optionally, suggest next steps or list remaining tickets
-    remaining_tickets = await db.get_active_tickets_for_engineer(user_id)
-    if remaining_tickets:
-        await message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets)) # Inline keyboard
-        await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb()) # Revert to default ReplyKeyboardMarkup
+    if success:
+        await message.answer(f"🚫 Заявка #{active_ticket_id} отменена.")
     else:
-        await message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
+        await message.answer("Эта заявка не может быть отменена.")
 
 @router.callback_query(TicketCallback.filter(F.action == "eng_cancel"))
 async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, state: FSMContext, is_engineer: bool):
-    if not is_engineer:
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_engineer(callback.from_user.id):
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
@@ -315,7 +339,15 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
         await callback.answer("Это не ваша заявка или она уже закрыта.", show_alert=True)
         return
 
-    await db.close_ticket(ticket_id, status='canceled', comment='Отменена инженером')
+    # Единая бизнес-логика отмены (статус, уведомление клиента, состояние FSM)
+    success = await cancel_ticket_service(
+        bot, callback.message, db, state,
+        callback.from_user.id, ticket_id,
+        comment='Отменена инженером',
+    )
+    if not success:
+        await callback.answer("Заявка не может быть отменена.", show_alert=True)
+        return
 
     # Обновляем сообщение об отмене заявки (учитываем медиа-сообщения)
     try:
@@ -328,31 +360,6 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
             await callback.message.edit_text(callback.message.html_text + canceled_suffix)
     except Exception as e:
         logger.warning(f"Не удалось обновить сообщение об отмене заявки #{ticket_id}: {e}")
-
-    try:
-        await bot.send_message(
-            ticket['client_id'],
-            f"🚫 Заявка #{ticket_id} была отменена инженером.",
-            reply_markup=main_menu()
-        )
-    except Exception as e:
-        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} об отмене заявки #{ticket_id}: {e}")
-
-    current_state_data = await state.get_data()
-    if current_state_data.get("active_ticket_id") == ticket_id:
-        await state.update_data(active_ticket_id=None)
-
-    remaining_tickets = await db.get_active_tickets_for_engineer(callback.from_user.id)
-    if remaining_tickets:
-        try:
-            await callback.message.answer("У вас остались активные заявки. Выберите следующую для работы:", reply_markup=engineer_select_client_kb(remaining_tickets))
-        except Exception as e:
-            logger.warning(f"Не удалось отправить список оставшихся заявок инженеру {callback.from_user.id}: {e}")
-    else:
-        try:
-            await callback.message.answer("У вас больше нет активных заявок в работе.", reply_markup=engineer_default_menu_kb())
-        except Exception as e:
-            logger.warning(f"Не удалось отправить сообщение об отсутствии заявок инженеру {callback.from_user.id}: {e}")
 
 
 async def _delete_ticket_notifications(bot: Bot, db: Database, ticket_id: int, except_engineer_id: int = None):

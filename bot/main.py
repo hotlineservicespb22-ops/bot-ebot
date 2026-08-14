@@ -1,6 +1,8 @@
 import asyncio
 import html
 import logging
+import signal
+import sys
 import traceback
 
 from aiogram import Bot, Dispatcher
@@ -19,6 +21,7 @@ from bot.config import (
     ADMIN_IDS,
     BOT_TOKEN,
     DB_PATH,
+    LOG_LEVEL,
     REDIS_URL,
     TICKET_TIMEOUT,
     WEBHOOK_HOST,
@@ -28,30 +31,13 @@ from bot.config import (
 )
 from bot.database import Database
 from bot.handlers import admin, client, engineer, relay
+from bot.logging_config import setup_logging
 from bot.middlewares import DbSessionMiddleware, RoleMiddleware, ThrottlingMiddleware
 
-# Настройка логирования для отладки
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
-# Включаем DEBUG-логи для aiogram, чтобы видеть все входящие события в консоли
-logging.getLogger('aiogram.event').setLevel(logging.DEBUG)
-
-# Логирование в файл с ротацией
-from logging.handlers import RotatingFileHandler
-
-file_handler = RotatingFileHandler(
-    "bot.log",
-    maxBytes=5 * 1024 * 1024,  # 5 MB
-    backupCount=3,
-    encoding="utf-8"
-)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-root_logger = logging.getLogger()
-root_logger.addHandler(file_handler)
+# При DEBUG видим все входящие события aiogram в консоли
+if LOG_LEVEL == "DEBUG":
+    logging.getLogger('aiogram.event').setLevel(logging.DEBUG)
 
 def get_storage():
     """Возвращает хранилище FSM: RedisStorage, если задан REDIS_URL, иначе MemoryStorage."""
@@ -61,18 +47,16 @@ def get_storage():
         redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
         logger.info("Используется RedisStorage для FSM")
         return RedisStorage(redis=redis_client)
-    logger.info("Используется MemoryStorage для FSM (REDIS_URL не задан)")
+    logger.info(
+        "Используется MemoryStorage для FSM. Состояния диалогов будут потеряны "
+        "при перезапуске бота. Для продакшена рекомендуется задать REDIS_URL."
+    )
     return MemoryStorage()
-
-# FSM timeout with MemoryStorage is complex and requires custom state tracking or a different storage backend.
-# For this refactoring, we rely on explicit /cancel and inline cancel buttons.
 
 # Команды, доступные всем пользователям
 DEFAULT_COMMANDS = [
     BotCommand(command="start", description="🔄 Запустить бота"),
     BotCommand(command="help", description="❓ Помощь"),
-    BotCommand(command="my_requests", description="📋 Мои заявки"),
-    BotCommand(command="my_tickets", description="📋 Мои заявки в работе"),
     BotCommand(command="cancel", description="❌ Отменить действие"),
 ]
 
@@ -173,6 +157,9 @@ async def error_handler(event: ErrorEvent, bot: Bot, db: Database):
 
 
 async def main():
+    # Инициализация логирования (консоль + файл с ротацией) из конфигурации
+    setup_logging()
+
     # Database initialization
     db = Database(DB_PATH)
     await db.connect()
@@ -249,7 +236,9 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
     check_interval = min(max(TICKET_TIMEOUT // 2, 30), 300)  # От 30 сек до 5 мин
     while True:
         try:
-            expired = await db.get_expired_open_tickets(TICKET_TIMEOUT)
+            # Берём только просроченные заявки, по которым ещё не отправлялось уведомление
+            # (дедупликация: не спамим админам повторно каждые N минут).
+            expired = await db.get_expired_open_tickets_not_escalated(TICKET_TIMEOUT)
             for ticket in expired:
                 log_msg = (
                     f"⏰ <b>Заявка #{ticket['id']} не взята в работу!</b>\n\n"
@@ -266,6 +255,21 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
                         await bot.send_message(admin_id, log_msg)
                     except Exception as e:
                         logger.warning(f"Не удалось уведомить админа {admin_id} о просроченной заявке #{ticket['id']}: {e}")
+
+                # Уведомляем самого клиента о том, что заявка ещё не принята в работу
+                if ticket.get('client_id'):
+                    try:
+                        await bot.send_message(
+                            ticket['client_id'],
+                            f"⏰ <b>Ваша заявка #{ticket['id']} пока не принята в работу.</b>\n\n"
+                            "Дежурный инженер скоро подключится. Если ситуация срочная — позвоните "
+                            "по телефону <b>8 800 777-38-56</b>."
+                        )
+                    except Exception as e:
+                        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о просрочке заявки #{ticket['id']}: {e}")
+
+                # Помечаем заявку как эскалированную, чтобы не уведомлять повторно
+                await db.mark_ticket_escalated(ticket['id'])
         except Exception as e:
             logger.error(f"Ошибка в фоновой задаче timeout-проверки: {e}")
         await asyncio.sleep(check_interval)
@@ -275,8 +279,33 @@ async def shutdown():
     """Корректное завершение работы бота."""
     logger.info("Бот останавливается...")
 
+def _handle_signal():
+    """Обработчик сигналов завершения: прерывает основной event loop."""
+    logger.info("Получен сигнал завершения — останавливаем бота...")
+    # Прерываем главную задачу (main) через отмену всех задач текущего loop
+    for task in asyncio.all_tasks():
+        task.cancel()
+
+
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        # Graceful shutdown по SIGINT/SIGTERM (недоступно в Windows)
+        if sys.platform != "win32":
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, _handle_signal)
+                except NotImplementedError:
+                    pass
+            try:
+                loop.run_until_complete(main())
+            finally:
+                loop.close()
+        else:
+            # Windows не поддерживает add_signal_handler — используем asyncio.run
+            asyncio.run(main())
     except KeyboardInterrupt:
         print("Бот остановлен")
+    except asyncio.CancelledError:
+        print("Бот остановлен по сигналу")

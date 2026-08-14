@@ -1,5 +1,7 @@
+import datetime
 import html
 import logging
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
@@ -7,21 +9,44 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from bot.config import ADMIN_IDS
+from bot.config import ADMIN_IDS, FSM_TIMEOUT, TICKET_CREATE_COOLDOWN
 from bot.database import Database
+from bot.faq import FAQ_ANSWERS, FAQ_SECTIONS
 from bot.keyboards import (
+    FaqCallback,
+    MyRequestsCallback,
     RatingCallback,
     active_ticket_menu_kb,
     cancel_kb,
     contact_kb,
     engineer_default_menu_kb,
     engineer_main_menu,
+    faq_answer_kb,
+    faq_main_kb,
+    faq_section_kb,
     main_menu,
+    my_requests_pagination_kb,
     ticket_action_kb,
 )
 from bot.media import save_media_file
 
 router = Router()
+
+# Модульный словарь для антиспама: user_id -> время последнего старта воронки.
+# Защищает от массового создания заявок одним клиентом.
+_last_ticket_start: dict[int, float] = {}
+# Максимальный размер словаря антиспама (защита от утечки памяти).
+_ANTISPAM_MAX_SIZE = 1000
+# TTL записей антиспама (секунды): записи старше этого значения удаляются.
+_ANTISPAM_TTL = max(TICKET_CREATE_COOLDOWN * 10, 600)
+
+
+def _cleanup_antispam_dict(now: float) -> None:
+    """Удаляет устаревшие записи из словаря антиспама (защита от утечки памяти)."""
+    if len(_last_ticket_start) > _ANTISPAM_MAX_SIZE:
+        stale = [uid for uid, ts in _last_ticket_start.items() if now - ts > _ANTISPAM_TTL]
+        for uid in stale:
+            _last_ticket_start.pop(uid, None)
 
 class TicketForm(StatesGroup):
     """Оптимизированная короткая воронка FSM: 4 шага."""
@@ -30,6 +55,32 @@ class TicketForm(StatesGroup):
     company_city = State()    # Шаг 3: город + ИНН/название компании
     contact = State()         # Шаг 4: контакт через request_contact
     rating_comment = State()  # Комментарий после оценки заявки
+
+async def check_fsm_expired(message: Message, state: FSMContext) -> bool:
+    """
+    Проверяет, не истёк ли таймаут незавершённой воронки оформления заявки.
+
+    Если состояние висит дольше FSM_TIMEOUT — сбрасывает его и уведомляет клиента.
+    Возвращает True, если состояние было сброшено (обработку шага нужно прервать).
+    """
+    data = await state.get_data()
+    started_raw = data.get('fsm_started_at')
+    if not started_raw:
+        return False
+    try:
+        started = datetime.datetime.fromisoformat(started_raw)
+    except (ValueError, TypeError):
+        return False
+
+    elapsed = datetime.datetime.now(datetime.timezone.utc) - started
+    if elapsed.total_seconds() > FSM_TIMEOUT:
+        await state.clear()
+        await message.answer(
+            "⏰ Время оформления заявки истекло. Пожалуйста, начните заново, нажав «🛠 Оставить заявку на сервис ЧПУ».",
+            reply_markup=main_menu()
+        )
+        return True
+    return False
 
 async def delete_last_bot_message(bot: Bot, message: Message, state: FSMContext):
     """UX-очистка: удаляет предыдущее сообщение бота (вопрос) из чата."""
@@ -141,13 +192,22 @@ async def cmd_cancel(message: Message, state: FSMContext):
 @router.message(F.text == "📋 Мои заявки")
 async def my_requests(message: Message, db: Database, is_engineer: bool):
     """Показывает историю заявок клиента, а для инженера — его активные заявки."""
-    # Если пользователь — инженер, показываем его активные заявки (как инженера),
-    # а не клиентские. Иначе инженер, нажимая "Мои заявки", видит пустой список
-    # ("У вас пока нет заявок"), т.к. у него нет заявок как у клиента.
+    await _show_my_requests(message, db, is_engineer, page=0)
+
+
+async def _show_my_requests(
+    target: Message,
+    db: Database,
+    is_engineer: bool,
+    page: int = 0,
+    edit: bool = False,
+) -> None:
+    """Внутренняя логика показа истории заявок с пагинацией (клиент) или активных заявок (инженер)."""
+    # Если пользователь — инженер, показываем его активные заявки (как инженера)
     if is_engineer:
-        tickets = await db.get_active_tickets_for_engineer(message.from_user.id)
+        tickets = await db.get_active_tickets_for_engineer(target.from_user.id)
         if not tickets:
-            await message.answer(
+            await target.answer(
                 "У вас нет активных заявок в работе.",
                 reply_markup=engineer_default_menu_kb()
             )
@@ -166,13 +226,27 @@ async def my_requests(message: Message, db: Database, is_engineer: bool):
                 f"🎫 <b>#{t['id']}</b> — {status}\n"
                 f"   {html.escape(str(t['machine_info'] or '—'))}: {html.escape(str(t['problem'] or '—'))[:50]}"
             )
-        await message.answer("\n".join(lines), reply_markup=engineer_default_menu_kb())
+        if edit:
+            await target.edit_text("\n".join(lines), reply_markup=engineer_default_menu_kb())
+        else:
+            await target.answer("\n".join(lines), reply_markup=engineer_default_menu_kb())
         return
 
-    tickets = await db.get_client_tickets(message.from_user.id, limit=10)
-    if not tickets:
-        await message.answer("📋 У вас пока нет заявок.", reply_markup=main_menu())
+    # Для клиента: история заявок с пагинацией (10 на странице)
+    per_page = 10
+    tickets = await db.get_client_tickets(target.from_user.id, limit=per_page, offset=page * per_page)
+    if not tickets and page == 0:
+        await target.answer("📋 У вас пока нет заявок.", reply_markup=main_menu())
         return
+
+    # Определяем общее число страниц (грубая оценка: если набрано per_page — есть следующая)
+    has_more = len(tickets) == per_page
+    total_pages = page + 2 if has_more else page + 1
+    if not tickets and page > 0:
+        # Страница вышла за пределы — показываем последнюю известную
+        page = max(0, page - 1)
+        tickets = await db.get_client_tickets(target.from_user.id, limit=per_page, offset=page * per_page)
+        total_pages = page + 1
 
     status_map = {
         'open': '🟡 Ожидает инженера',
@@ -180,14 +254,31 @@ async def my_requests(message: Message, db: Database, is_engineer: bool):
         'completed': '✅ Завершена',
         'canceled': '🚫 Отменена'
     }
-    lines = ["<b>📋 Ваши заявки:</b>\n"]
+    lines = [f"<b>📋 Ваши заявки:</b> (стр. {page + 1})\n"]
     for t in tickets:
         status = status_map.get(t['status'], t['status'])
         lines.append(
             f"🎫 <b>#{t['id']}</b> — {status}\n"
             f"   {html.escape(str(t['machine_info'] or '—'))}: {html.escape(str(t['problem'] or '—'))[:50]}"
         )
-    await message.answer("\n".join(lines), reply_markup=main_menu())
+    kb = my_requests_pagination_kb(page, total_pages) if len(tickets) > 0 else None
+    if edit:
+        await target.edit_text("\n".join(lines), reply_markup=kb or main_menu())
+    else:
+        await target.answer("\n".join(lines), reply_markup=kb or main_menu())
+
+
+@router.callback_query(MyRequestsCallback.filter())
+async def my_requests_page_callback(callback: CallbackQuery, callback_data: MyRequestsCallback, db: Database, is_engineer: bool):
+    """Переключает страницу истории заявок клиента."""
+    await callback.answer()
+    await _show_my_requests(callback.message, db, is_engineer, page=callback_data.page, edit=True)
+
+
+@router.callback_query(F.data == "myreq:noop")
+async def my_requests_noop(callback: CallbackQuery):
+    """Обрабатывает нажатие на кнопку-счётчик страницы (ничего не делает)."""
+    await callback.answer()
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, is_engineer: bool):
@@ -226,63 +317,94 @@ async def cmd_start(message: Message, is_engineer: bool):
         )
 
 @router.message(F.text == "❓ Частые вопросы")
-async def show_faq(message: Message):
+async def show_faq(message: Message, state: FSMContext):
+    """Показывает главное меню FAQ с кнопками-разделами."""
+    await state.clear()  # Сбрасываем FSM, чтобы FAQ не мешал оформлению заявки
     faq_text = (
         "❓ <b>Часто задаваемые вопросы (FAQ)</b>\n\n"
         "🕐 <b>Режим работы:</b> заявки принимаем круглосуточно, 24/7. Реакция на обращение — в течение 15 минут.\n"
         "📞 Единый телефон: <b>8 800 777-38-56</b>\n"
         "✉️ E-mail: info@hotline-service.ru\n"
         "🌐 Сайт: <a href=\"https://hotline-service.ru\">hotline-service.ru</a>\n\n"
-        "─── <b>Оборудование и чиллер</b> ───\n"
-        "<b>1. Почему чиллер не в комплекте?</b>\n"
-        "Мощность трубки клиент выбирает сам, поэтому чиллер не навязываем. Подбор: до 60 Вт — CW-3000; 80–100 Вт — CW-5000; 100–130 Вт — CW-5200; 130 Вт и выше — CW-5300 и мощнее.\n\n"
-        "<b>2. Какую воду заливать в чиллер?</b>\n"
-        "Только дистиллированную, рабочая температура 15–25 °C. Для трубки допустим пропиленгликоль до 30%. Антифриз и этиленгликоль нельзя — они разъедают трубку.\n\n"
-        "<b>3. Как часто менять воду в чиллере?</b>\n"
-        "Не реже одного раза в 5–6 месяцев при работе 8 часов в день, 5 дней в неделю.\n\n"
-        "<b>4. Какой компрессор нужен?</b>\n"
-        "Для гравировки — мембранный (40–70 л/мин). Для резки толстых материалов и работы 24/7 — поршневой безмасляный (70–150 л/мин, 2–6 бар). Для металлореза — до 20 бар.\n\n"
-        "─── <b>Лазерная трубка</b> ───\n"
-        "<b>5. Какой ресурс у трубки?</b>\n"
-        "От 1500 до 10000 часов — зависит от режима работы и качества охлаждения.\n\n"
-        "<b>6. Какая гарантия на трубку?</b>\n"
-        "6 месяцев, если ПНР делали специалисты Hotline-Service, и 3 месяца при самостоятельной установке. Гарантия покрывает искажение луча, прогорание внутренних зеркал и отсутствие луча.\n\n"
-        "<b>7. Нужен ли новый БВН при замене трубки?</b>\n"
-        "Часто да: мощность БВН должна соответствовать новой трубке. Важно не эксплуатировать БВН выше 85% мощности.\n\n"
-        "─── <b>Возможности станков</b> ───\n"
-        "<b>8. Можно ли резать металл на CO2-станке?</b>\n"
-        "Обычным CO2-станком — нет. Металл режут специальной версией NC (с подачей кислорода), фрезером или волоконным лазерным металлорезом.\n\n"
-        "<b>9. Можно ли работать с ПВХ?</b>\n"
-        "Резать ПВХ на CO2 не рекомендуется: выделяются агрессивные вещества, разрушающие узлы станка. Маркировать пластики можно, но ПВХ — осторожно и с вытяжкой.\n\n"
-        "─── <b>Обслуживание</b> ───\n"
-        "<b>10. Как часто чистить оптику на CO2?</b>\n"
-        "Защитное стекло и линзу осматривать каждый день, три зеркала чистить по мере необходимости. Грязное выходное зеркало трубки ведёт к её перегреву и гибели.\n\n"
-        "<b>11. Что такое юстировка и как часто её делать?</b>\n"
-        "Это настройка луча по трём зеркалам и его центровка на сопло. На рамных станках после перевозки повторная юстировка обычно не нужна. Проверять стоит при двоении, косом резе или падении мощности.\n\n"
-        "<b>12. Какой стабилизатор нужен?</b>\n"
-        "Только сервоприводный (например, Ресанта АСН/1-ЭМ): точность 2%, вход 140–260 В, чистая синусоида. Дешёвые релейные модели использовать нельзя — они портят технику.\n\n"
-        "<b>13. Как заземлять станок?</b>\n"
-        "Нужен отдельный контур заземления с сопротивлением менее 4 Ом. Зануление и заземление на трубу отопления недопустимы.\n\n"
-        "─── <b>Конструкция станков</b> ───\n"
-        "<b>14. Чем отличается стол ST от LT?</b>\n"
-        "ST — статичный (неподвижный), ход по вертикали 40 мм регулируется соплом. LT — моторизованный подъёмный, опускается на 160 мм на цепи, удобен для толстых заготовок.\n\n"
-        "<b>15. Что даёт автофокус?</b>\n"
-        "Автоматически держит фокус луча на поверхности материала по данным лазерного дальномера. Удобно для неровных и толстых материалов.\n\n"
-        "<b>16. Зачем нужен Duos?</b>\n"
-        "Это версия с двумя головами и двумя трубками: удобна для тиража одинаковых изделий, обе головы работают сразу. Рекомендуется два чиллера.\n\n"
-        "<b>17. Сколько мощности трубки нужно на толщину фанеры?</b>\n"
-        "Ориентир — примерно 10 Вт на каждый 1 мм толщины, держа трубку на 80% мощности. Например, для фанеры 6 мм нужна трубка 100–120 Вт.\n\n"
-        "─── <b>Гарантия и ремонт</b> ───\n"
-        "<b>18. Почему ремонт платный, станок же недавно куплен?</b>\n"
-        "Гарантия покрывает только заводские дефекты. Расходники, перегрев, нарушение правил установки и эксплуатации, механические повреждения — вне гарантии.\n\n"
-        "🔧 Мы выполняем диагностику, пусконаладочные работы (ПНР), ремонт и техническое обслуживание станков с ЧПУ и лазерного оборудования.\n\n"
-        "Подробную информацию об услугах и ценах вы можете найти на нашем сайте:\n"
-        '👉 <a href="https://hotline-service.ru">hotline-service.ru</a>'
+        "🔧 Мы выполняем диагностику, пусконаладочные работы (ПНР), ремонт и техническое обслуживание станков с ЧПУ "
+        "и лазерного оборудования.\n\n"
+        "Выберите интересующий раздел:"
     )
-    await message.answer(faq_text, disable_web_page_preview=True)
+    await message.answer(faq_text, reply_markup=faq_main_kb(), disable_web_page_preview=True)
+
+@router.callback_query(FaqCallback.filter())
+async def faq_callback_handler(callback: CallbackQuery, callback_data: FaqCallback):
+    """Обрабатывает нажатия кнопок в FAQ: разделы, вопросы, ответы."""
+    # callback.answer() может упасть, если query устарел (пользователь нажал кнопку давно).
+    # Перехватываем исключение, чтобы продолжить обработку.
+    try:
+        await callback.answer()
+    except Exception:
+        logging.warning("Не удалось ответить на callback (query устарел): %s", callback_data)
+
+    if callback_data.action == "main":
+        # Возврат к списку разделов
+        text = "❓ <b>Часто задаваемые вопросы (FAQ)</b>\n\nВыберите раздел:"
+        try:
+            await callback.message.edit_text(text, reply_markup=faq_main_kb())
+        except Exception:
+            await callback.message.answer(text, reply_markup=faq_main_kb())
+        return
+
+    if callback_data.action == "section":
+        # Показываем список вопросов выбранного раздела
+        section = next((s for s in FAQ_SECTIONS if s["id"] == callback_data.section_id), None)
+        if not section:
+            try:
+                await callback.answer("Раздел не найден.", show_alert=True)
+            except Exception:
+                pass
+            return
+        text = f"{section['title']}\n\nВыберите вопрос:"
+        try:
+            await callback.message.edit_text(text, reply_markup=faq_section_kb(section["id"]))
+        except Exception:
+            await callback.message.answer(text, reply_markup=faq_section_kb(section["id"]))
+        return
+
+    if callback_data.action == "answer":
+        # Показываем развёрнутый ответ на выбранный вопрос
+        answer = FAQ_ANSWERS.get(callback_data.question_id)
+        if not answer:
+            try:
+                await callback.answer("Вопрос не найден.", show_alert=True)
+            except Exception:
+                pass
+            return
+        text = answer
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=faq_answer_kb(callback_data.section_id, callback_data.question_id)
+            )
+        except Exception:
+            await callback.message.answer(
+                text,
+                reply_markup=faq_answer_kb(callback_data.section_id, callback_data.question_id)
+            )
+        return
 
 @router.message(F.text == "🛠 Оставить заявку на сервис ЧПУ")
 async def start_ticket(message: Message, state: FSMContext, bot: Bot, db: Database):
+    # Антиспам: ограничиваем частоту запуска воронки одним клиентом
+    now = time.monotonic()
+    # Периодическая очистка устаревших записей (защита от утечки памяти)
+    _cleanup_antispam_dict(now)
+    last = _last_ticket_start.get(message.from_user.id, 0.0)
+    if now - last < TICKET_CREATE_COOLDOWN:
+        remaining = int(TICKET_CREATE_COOLDOWN - (now - last))
+        await message.answer(
+            f"⏳ Не так быстро! Подождите {remaining} сек. перед созданием новой заявки.",
+            reply_markup=main_menu()
+        )
+        return
+    _last_ticket_start[message.from_user.id] = now
+
     # Не даём клиенту создать новую заявку, пока есть активная
     active = await db.get_active_ticket_for_client(message.from_user.id)
     if active:
@@ -301,11 +423,19 @@ async def start_ticket(message: Message, state: FSMContext, bot: Bot, db: Databa
         "Чтобы прервать, нажмите '❌ Отмена' внизу.",
         reply_markup=cancel_kb()
     )
-    # Сохраняем ID сообщения клиента (кнопку), чтобы удалить его на следующем шаге
-    await state.update_data(last_bot_msg_id=msg.message_id, last_client_msg_id=message.message_id)
+    # Сохраняем ID сообщения клиента (кнопку), чтобы удалить его на следующем шаге,
+    # а также метку времени начала воронки (для таймаута).
+    await state.update_data(
+        last_bot_msg_id=msg.message_id,
+        last_client_msg_id=message.message_id,
+        fsm_started_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
 
 @router.message(StateFilter(TicketForm.problem_media))
 async def ticket_problem_media(message: Message, state: FSMContext, bot: Bot):
+    # Если воронка «зависла» дольше таймаута — сбрасываем состояние
+    if await check_fsm_expired(message, state):
+        return
     # UX-очистка: удаляем предыдущее сообщение бота и клиента
     await delete_last_bot_message(bot, message, state)
     await delete_last_client_message(bot, message, state)
@@ -337,6 +467,9 @@ async def ticket_problem_media(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(StateFilter(TicketForm.machine_info))
 async def ticket_machine_info(message: Message, state: FSMContext, bot: Bot):
+    # Если воронка «зависла» дольше таймаута — сбрасываем состояние
+    if await check_fsm_expired(message, state):
+        return
     # UX-очистка: удаляем предыдущее сообщение бота и клиента
     await delete_last_bot_message(bot, message, state)
     await delete_last_client_message(bot, message, state)
@@ -376,6 +509,9 @@ async def ticket_machine_info(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(StateFilter(TicketForm.company_city))
 async def ticket_company_city(message: Message, state: FSMContext, bot: Bot):
+    # Если воронка «зависла» дольше таймаута — сбрасываем состояние
+    if await check_fsm_expired(message, state):
+        return
     # UX-очистка: удаляем предыдущее сообщение бота и клиента
     await delete_last_bot_message(bot, message, state)
     await delete_last_client_message(bot, message, state)
@@ -396,6 +532,9 @@ async def ticket_company_city(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(StateFilter(TicketForm.contact))
 async def ticket_contact(message: Message, state: FSMContext, bot: Bot, db: Database):
+    # Если воронка «зависла» дольше таймаута — сбрасываем состояние
+    if await check_fsm_expired(message, state):
+        return
     # UX-очистка: удаляем предыдущее сообщение бота и клиента
     await delete_last_bot_message(bot, message, state)
     await delete_last_client_message(bot, message, state)
@@ -475,7 +614,7 @@ async def ticket_contact(message: Message, state: FSMContext, bot: Bot, db: Data
                 sender_role='client'
             )
 
-    # Уведомляем администраторов о новой заявке
+    # Уведомляем администраторов о новой заявке (из .env и из БД)
     admin_notify = (
         f"🆕 <b>Новая заявка #{ticket_id}</b>\n\n"
         f"🏢 <b>Компания/Город:</b> {html.escape(data.get('company_city', ''))}\n"
@@ -484,7 +623,14 @@ async def ticket_contact(message: Message, state: FSMContext, bot: Bot, db: Data
         f"<b>Контакты:</b> {html.escape(data.get('contact', ''))}\n"
         f"<b>Отправитель:</b> {html.escape(message.from_user.full_name)}"
     )
-    for admin_id in ADMIN_IDS:
+    # Собираем админов из .env и из БД
+    admin_ids = set(ADMIN_IDS)
+    try:
+        db_admins = await db.get_admins()
+        admin_ids.update(row['user_id'] for row in db_admins)
+    except Exception as e:
+        logging.warning(f"Не удалось получить админов из БД для уведомлений: {e}")
+    for admin_id in admin_ids:
         try:
             await bot.send_message(admin_id, admin_notify)
         except Exception as e:

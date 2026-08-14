@@ -118,10 +118,10 @@ def format_ticket_history(messages) -> str:
         lines.append(f"<b>{role_icon}</b> ({time_str}):\n{html.escape(text)}\n")
     return "\n".join(lines)
 
-async def show_ticket_list(msg, tickets, mode: str, db: Database, edit: bool = False):
-    """Показывает (или редактирует) сообщение со списком заявок."""
+async def show_ticket_list(msg, tickets, mode: str, db: Database, edit: bool = False, page: int = 0):
+    """Показывает (или редактирует) сообщение со списком заявок (с пагинацией)."""
     text = build_list_text(tickets, mode)
-    kb = engineer_list_kb(tickets, mode)
+    kb = engineer_list_kb(tickets, mode, page=page)
     if edit:
         await msg.edit_text(text, reply_markup=kb)
     else:
@@ -169,9 +169,9 @@ async def list_my_tickets(message: Message, db: Database, is_engineer: bool, sta
 
     # Сохраняем данные для навигации по списку
     ids = [t['id'] for t in active_tickets]
-    await state.update_data(ticket_view_mode='mine', ticket_view_ids=ids, ticket_view_index=0)
+    await state.update_data(ticket_view_mode='mine', ticket_view_ids=ids, ticket_view_index=0, ticket_view_page=0)
 
-    await show_ticket_list(message, active_tickets, 'mine', db)
+    await show_ticket_list(message, active_tickets, 'mine', db, page=0)
     await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb())
 
 @router.message(F.text == "📥 Нераспределенные заявки")
@@ -187,9 +187,9 @@ async def list_open_tickets(message: Message, db: Database, is_engineer: bool, s
 
     # Сохраняем данные для навигации по списку
     ids = [t['id'] for t in open_tickets]
-    await state.update_data(ticket_view_mode='open', ticket_view_ids=ids, ticket_view_index=0)
+    await state.update_data(ticket_view_mode='open', ticket_view_ids=ids, ticket_view_index=0, ticket_view_page=0)
 
-    await show_ticket_list(message, open_tickets, 'open', db)
+    await show_ticket_list(message, open_tickets, 'open', db, page=0)
     await message.answer("Ваше меню обновлено.", reply_markup=engineer_default_menu_kb())
 
 @router.callback_query(TicketCallback.filter(F.action == "view"))
@@ -257,6 +257,28 @@ async def navigate_ticket(callback: CallbackQuery, callback_data: TicketCallback
         reply_markup=engineer_detail_kb(ticket_id, mode, index, len(ids))
     )
 
+@router.callback_query(TicketCallback.filter(F.action == "page"))
+async def change_ticket_page(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
+    """Переключает страницу списка заявок инженера."""
+    if not await _require_engineer(callback, is_engineer):
+        return
+    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
+    data = await state.get_data()
+    mode = data.get('ticket_view_mode', 'mine')
+    page = max(0, callback_data.page)
+
+    await state.update_data(ticket_view_page=page)
+
+    tickets = await get_ticket_list_data(db, callback.from_user.id, mode)
+    if not tickets:
+        await callback.message.edit_text("Список пуст.")
+        return
+
+    ids = [t['id'] for t in tickets]
+    await state.update_data(ticket_view_ids=ids)
+
+    await show_ticket_list(callback.message, tickets, mode, db, edit=True, page=page)
+
 @router.callback_query(TicketCallback.filter(F.action == "back_to_list"))
 async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
@@ -264,6 +286,7 @@ async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, d
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
     data = await state.get_data()
     mode = data.get('ticket_view_mode', 'mine')
+    page = data.get('ticket_view_page', 0) or 0
 
     tickets = await get_ticket_list_data(db, callback.from_user.id, mode)
     if not tickets:
@@ -274,7 +297,7 @@ async def back_to_list(callback: CallbackQuery, callback_data: TicketCallback, d
     ids = [t['id'] for t in tickets]
     await state.update_data(ticket_view_ids=ids)
 
-    await show_ticket_list(callback.message, tickets, mode, db, edit=True)
+    await show_ticket_list(callback.message, tickets, mode, db, edit=True, page=page)
 
 @router.callback_query(TicketCallback.filter(F.action == "redirect"))
 async def redirect_to_ticket(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):
@@ -351,6 +374,51 @@ async def _send_relayed_message(
     elif message.text:
         await safe_send(bot, target_id, "send_message", text=f"<b>{prefix}</b>{html.escape(message.text)}", reply_markup=reply_markup)
 
+
+async def _persist_relayed_message(
+    db: Database,
+    ticket_id: int,
+    sender_id: int,
+    sender_role: str,
+    message: Message,
+    method: str,
+    file_id,
+    bot: Bot,
+) -> None:
+    """
+    Сохраняет сообщение переписки и, при наличии, медиафайл заявки.
+    Общая логика для сообщений клиента и инженера (устраняет дублирование).
+    """
+    # Сохраняем в историю переписки
+    await db.save_message(
+        ticket_id=ticket_id,
+        sender_id=sender_id,
+        sender_role=sender_role,
+        text=message.text or message.caption or '',
+        media_type=file_id and method.replace('send_', '') or None
+    )
+
+    # Сохраняем медиафайл в папку заявки
+    if file_id and method not in ('send_location', 'send_contact'):
+        media_type = method.replace('send_', '')
+        file_path = await save_media_file(
+            bot=bot,
+            file_id=str(file_id),
+            ticket_id=ticket_id,
+            media_type=media_type,
+            file_name=getattr(message, media_type, None) and getattr(getattr(message, media_type), 'file_name', None)
+        )
+        if file_path:
+            await db.save_media(
+                ticket_id=ticket_id,
+                file_id=str(file_id),
+                file_type=media_type,
+                file_path=file_path,
+                sender_id=sender_id,
+                sender_role=sender_role
+            )
+
+
 @router.message()
 async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: bool, state: FSMContext):
     user_id = message.from_user.id
@@ -360,14 +428,11 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
     if ticket:
         eng_id = ticket['engineer_id']
         if not eng_id:  # Заявка ещё не взята инженером (status = 'open')
-            # Сохраняем сообщение клиента в историю, чтобы оно не потерялось до назначения инженера
+            # Сохраняем сообщение клиента (текст + медиа) в историю, чтобы оно
+            # не потерялось и было передано инженеру после взятия заявки.
             method, file_id, file_size = get_file_id_and_size(message)
-            await db.save_message(
-                ticket_id=ticket['id'],
-                sender_id=user_id,
-                sender_role='client',
-                text=message.text or message.caption or '',
-                media_type=file_id and method.replace('send_', '') or None
+            await _persist_relayed_message(
+                db, ticket['id'], user_id, 'client', message, method, file_id, bot
             )
             await message.answer(
                 "⏳ Ваша заявка ещё ожидает назначения дежурного инженера. "
@@ -390,34 +455,8 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
             display_name = "Клиент"
         prefix = f"💬 [{html.escape(display_name)} | Заявка #{ticket['id']}]:\n"
 
-        # Сохраняем в историю переписки
-        await db.save_message(
-            ticket_id=ticket['id'],
-            sender_id=user_id,
-            sender_role='client',
-            text=message.text or message.caption or '',
-            media_type=file_id and method.replace('send_', '') or None
-        )
-
-        # Сохраняем медиафайл в папку заявки
-        if file_id and method not in ('send_location', 'send_contact'):
-            media_type = method.replace('send_', '')
-            file_path = await save_media_file(
-                bot=bot,
-                file_id=str(file_id),
-                ticket_id=ticket['id'],
-                media_type=media_type,
-                file_name=getattr(message, media_type, None) and getattr(getattr(message, media_type), 'file_name', None)
-            )
-            if file_path:
-                await db.save_media(
-                    ticket_id=ticket['id'],
-                    file_id=str(file_id),
-                    file_type=media_type,
-                    file_path=file_path,
-                    sender_id=user_id,
-                    sender_role='client'
-                )
+        # Сохраняем в историю переписки и медиафайл (общая логика)
+        await _persist_relayed_message(db, ticket['id'], user_id, 'client', message, method, file_id, bot)
 
         # Кнопка для быстрого переключения инженера на эту заявку для ответа
         redirect_kb = engineer_redirect_kb(ticket['id'])
@@ -485,34 +524,8 @@ async def relay_messages(message: Message, bot: Bot, db: Database, is_engineer: 
             engineer_name = "Инженер"
         prefix = f"👨‍🔧 [{html.escape(engineer_name)}]:\n"
 
-        # Сохраняем в историю переписки
-        await db.save_message(
-            ticket_id=target_ticket['id'],
-            sender_id=user_id,
-            sender_role='engineer',
-            text=message.text or message.caption or '',
-            media_type=file_id and method.replace('send_', '') or None
-        )
-
-        # Сохраняем медиафайл в папку заявки
-        if file_id and method not in ('send_location', 'send_contact'):
-            media_type = method.replace('send_', '')
-            file_path = await save_media_file(
-                bot=bot,
-                file_id=str(file_id),
-                ticket_id=target_ticket['id'],
-                media_type=media_type,
-                file_name=getattr(message, media_type, None) and getattr(getattr(message, media_type), 'file_name', None)
-            )
-            if file_path:
-                await db.save_media(
-                    ticket_id=target_ticket['id'],
-                    file_id=str(file_id),
-                    file_type=media_type,
-                    file_path=file_path,
-                    sender_id=user_id,
-                    sender_role='engineer'
-                )
+        # Сохраняем в историю переписки и медиафайл (общая логика)
+        await _persist_relayed_message(db, target_ticket['id'], user_id, 'engineer', message, method, file_id, bot)
 
         await _send_relayed_message(bot, client_id, message, method, file_id, prefix)
         return

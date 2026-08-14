@@ -246,10 +246,32 @@ class TestCreateTask:
         mock_session.add_response({"result": {"task": {"id": 777}}})
         with patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"), \
              patch.object(bitrix, "BITRIX_TASK_PRIORITY", "2"), \
-             patch.object(bitrix, "BITRIX_CREATED_BY", "414"), \
              patch.object(bitrix, "BITRIX_TASK_DEADLINE_HOURS", ""):
             task_id = await bitrix.create_task("Заголовок", "Описание", 123)
             assert task_id == 777
+
+    async def test_creator_is_always_414(self, mock_session):
+        """Постановщик задачи всегда 414 (бизнес-требование), независимо от BITRIX_CREATED_BY."""
+        mock_session.add_response({"result": {"task": {"id": 778}}})
+        # Пробуем передать другой created_by и задать конфигурацию — должно быть проигнорировано
+        with patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"), \
+             patch.object(bitrix, "BITRIX_TASK_PRIORITY", "3"), \
+             patch.object(bitrix, "BITRIX_TASK_DEADLINE_HOURS", ""):
+            await bitrix.create_task("Заголовок", "Описание", 123, created_by=999)
+
+        # Проверяем payload последнего запроса — CREATED_BY всегда 414
+        post_calls = mock_session.post_calls
+        create_call = next(
+            (kwargs for args, kwargs in post_calls if "tasks.task.add" in str(args[0])),
+            None
+        )
+        assert create_call is not None
+        fields = create_call["json"]["fields"]
+        assert fields["CREATED_BY"] == 414
+        # Ответственный должен совпадать с переданным
+        assert fields["RESPONSIBLE_ID"] == 123
+        # Приоритет из конфигурации
+        assert fields["PRIORITY"] == "3"
 
     async def test_error_response(self, mock_session):
         mock_session.add_response({"error": "permission denied"})

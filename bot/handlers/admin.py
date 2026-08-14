@@ -21,6 +21,18 @@ from bot.keyboards import (
 router = Router()
 logger = logging.getLogger(__name__)
 
+
+async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs):
+    """
+    Безопасный вызов callback.answer(). Ошибка «query is too old / invalid»
+    (TelegramBadRequest) случается, если кнопку нажали давно или бот долго
+    обрабатывал запрос — она не должна ронять обработчик.
+    """
+    try:
+        await callback.answer(*args, **kwargs)
+    except Exception as e:
+        logger.warning(f"Не удалось ответить на callback (query устарел): {e}")
+
 # ===================== Админ-панель =====================
 
 @router.message(Command("admin"))
@@ -39,13 +51,18 @@ async def admin_panel_callback(callback: CallbackQuery, callback_data: AdminCall
     # Явная проверка прав через БД — даже если middleware не передал is_admin
     is_admin = await db.is_admin(callback.from_user.id)
     if not is_admin:
-        await callback.answer("🚫 Нет доступа.", show_alert=True)
+        await _safe_callback_answer(callback, "🚫 Нет доступа.", show_alert=True)
         return
 
-    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
+    await _safe_callback_answer(callback)  # Быстрый ответ Telegram для снятия спиннера на кнопке
 
     action = callback_data.action
-    if action == "stats":
+    if action == "back":
+        await callback.message.edit_text(
+            "🛠 <b>Админ-панель</b>\n\nВыберите действие:",
+            reply_markup=admin_menu_kb()
+        )
+    elif action == "stats":
         await cmd_stats(callback.message, db, is_admin, edit=True)
     elif action == "export":
         await cmd_export_tickets(callback.message, db, bot, is_admin, edit=True)
@@ -57,16 +74,12 @@ async def admin_panel_callback(callback: CallbackQuery, callback_data: AdminCall
         await show_duty_management(callback.message, db, edit=True)
     elif action == "duty_on":
         await db.set_engineer_active(callback_data.engineer_id, 1)
-        await callback.answer("✅ Инженер включён в дежурные.")
+        await _safe_callback_answer(callback, "✅ Инженер включён в дежурные.")
         await show_duty_management(callback.message, db, edit=True)
     elif action == "duty_off":
         await db.set_engineer_active(callback_data.engineer_id, 0)
-        await callback.answer("⚪ Инженер исключён из дежурных.")
+        await _safe_callback_answer(callback, "⚪ Инженер исключён из дежурных.")
         await show_duty_management(callback.message, db, edit=True)
-    elif action == "back":
-        await callback.message.edit_text("🛠 <b>Админ-панель</b>\n\nВыберите действие:", reply_markup=admin_menu_kb())
-
-# ===================== Управление администраторами =====================
 
 @router.message(Command("add_admin"))
 async def cmd_add_admin(message: Message, db: Database):
@@ -121,7 +134,10 @@ async def cmd_del_admin(message: Message, db: Database):
 @router.message(Command("list_admin"))
 async def cmd_list_admin(message: Message, db: Database, is_admin: bool, edit: bool = False):
     """Показывает список всех администраторов (из .env и БД)."""
-    if not is_admin:
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_admin(message.from_user.id):
+        if not edit:
+            await message.answer("🚫 У вас нет прав администратора.")
         return
 
     text = "<b>Список администраторов:</b>\n\n"
@@ -198,7 +214,10 @@ async def cmd_del_engineer(message: Message, db: Database, is_admin: bool):
 
 @router.message(Command("list_eng"))
 async def cmd_list_engineers(message: Message, db: Database, is_admin: bool, edit: bool = False):
-    if not is_admin:
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_admin(message.from_user.id):
+        if not edit:
+            await message.answer("🚫 У вас нет прав администратора.")
         return
     rows = await db.get_engineers()
     if not rows:
@@ -347,16 +366,31 @@ async def show_duty_management(message: Message, db: Database, edit: bool = Fals
 # ===================== Отчеты и статистика =====================
 
 def generate_csv(tickets):
+    """Формирует CSV с полной информацией по заявкам (включая доп. поля)."""
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['ID', 'Client ID', 'Client Name', 'Company', 'CNC Model', 'Problem', 'Contact', 'Status', 'Engineer ID', 'Comment'])
+    # Колонки с уточнёнными и доп. полями для более полного экспорта
+    writer.writerow([
+        'ID', 'Client ID', 'Client Name', 'Company', 'Equipment Type', 'Brand',
+        'CNC Model', 'Machine Info', 'Company City', 'Problem', 'Media ID',
+        'City', 'INN/Contract', 'Contact', 'Status', 'Engineer ID',
+        'Close Comment', 'Created At', 'Closed At'
+    ])
     for t in tickets:
-        writer.writerow([t['id'], t['client_id'], t['client_name'], t['company'], t['cnc_model'], t['problem'], t['contact'], t['status'], t['engineer_id'], t['close_comment']])
+        writer.writerow([
+            t['id'], t['client_id'], t['client_name'], t['company'], t['equipment_type'],
+            t['brand'], t['cnc_model'], t['machine_info'], t['company_city'], t['problem'],
+            t['media_id'], t['city'], t['inn_contract'], t['contact'], t['status'],
+            t['engineer_id'], t['close_comment'], t['created_at'], t['closed_at']
+        ])
     return output.getvalue().encode('utf-8-sig')
 
 @router.message(Command("export"))
 async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin: bool, edit: bool = False):
-    if not is_admin:
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_admin(message.from_user.id):
+        if not edit:
+            await message.answer("🚫 У вас нет прав администратора.")
         return
     
     # В edit-режиме редактируем текущее меню, в обычном — отправляем статус
@@ -396,9 +430,8 @@ async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin:
             await status_msg.edit_text("В базе данных нет заявок за указанный период.")
         return
 
-    # Run in executor to avoid blocking
-    loop = asyncio.get_event_loop()
-    csv_data = await loop.run_in_executor(None, generate_csv, tickets)
+    # Run in a thread to avoid blocking the event loop
+    csv_data = await asyncio.to_thread(generate_csv, tickets)
     
     document = BufferedInputFile(csv_data, filename=filename)
     
@@ -415,13 +448,17 @@ async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin:
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, db: Database, is_admin: bool, edit: bool = False):
-    """Выводит статистику по заявкам."""
-    if not is_admin:
+    """Выводит статистику по заявкам (с агрегацией в SQL)."""
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    if not await db.is_admin(message.from_user.id):
+        if not edit:
+            await message.answer("🚫 У вас нет прав администратора.")
         return
 
-    tickets = await db.get_all_tickets()
+    # Оптимизация: считаем заявки одним SQL-запросом, без загрузки всех строк
+    counts = await db.get_ticket_status_counts()
 
-    if not tickets:
+    if counts['total'] == 0:
         text = "Заявок пока нет."
         if edit:
             await message.edit_text(text, reply_markup=back_to_admin_kb())
@@ -429,10 +466,10 @@ async def cmd_stats(message: Message, db: Database, is_admin: bool, edit: bool =
             await message.answer(text, reply_markup=back_to_admin_kb())
         return
 
-    total_count = len(tickets)
-    open_count = sum(1 for t in tickets if t['status'] == 'open')
-    in_progress_count = sum(1 for t in tickets if t['status'] == 'in_progress')
-    closed_count = sum(1 for t in tickets if t['status'] in ('completed', 'canceled'))
+    total_count = counts['total']
+    open_count = counts['open']
+    in_progress_count = counts['in_progress']
+    closed_count = counts['completed'] + counts['canceled']
 
     text = (
         f"📊 <b>Общая статистика по заявкам:</b>\n\n"

@@ -3,6 +3,8 @@ import datetime
 
 import aiosqlite
 
+from bot.migrations import mark_applied, run_migrations
+
 
 class Database:
     def __init__(self, db_path: str):
@@ -13,6 +15,14 @@ class Database:
     async def connect(self):
         self.conn = await aiosqlite.connect(self.db_path)
         self.conn.row_factory = aiosqlite.Row
+        # PRAGMA-оптимизации: внешние ключи, WAL для конкурентности, таймаут блокировки
+        await self.conn.execute("PRAGMA foreign_keys=ON")
+        await self.conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            await self.conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass  # Для in-memory БД WAL недоступен — игнорируем
+        await self.conn.commit()
 
     async def close(self):
         if self.conn:
@@ -126,38 +136,17 @@ class Database:
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_ticket ON messages(ticket_id)")
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_media_ticket ON media(ticket_id)")
-            
+
+            # Базовая схема (версия 1) создана — помечаем её в реестре миграций.
+            from bot.migrations import ensure_schema_migrations_table
+            await ensure_schema_migrations_table(self.conn)
+            await mark_applied(self.conn, 1, "base_schema")
             await self.conn.commit()
 
     async def migrate(self):
         async with self.lock:
-            cursor = await self.conn.execute("PRAGMA table_info(tickets)")
-            columns = set(row['name'] for row in await cursor.fetchall())
-
-            # Колонки, которые нужно добавить (если их ещё нет)
-            columns_to_add = [
-                ('close_comment', 'TEXT'),
-                ('machine_info', 'TEXT'),
-                ('company_city', 'TEXT'),
-                ('created_at', 'TEXT'),
-                ('closed_at', 'TEXT'),
-                ('machine_media_id', 'TEXT'),
-            ]
-            for col_name, col_type in columns_to_add:
-                if col_name not in columns:
-                    await self.conn.execute(f"ALTER TABLE tickets ADD COLUMN {col_name} {col_type}")
-                    await self.conn.commit()
-                    columns.add(col_name)
-
-            # Индекс на created_at создаём после того, как колонка гарантированно существует
-            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created_at ON tickets(created_at)")
-
-            # Миграция для таблицы engineers: добавляем bitrix_user_id
-            cursor = await self.conn.execute("PRAGMA table_info(engineers)")
-            eng_columns = set(row['name'] for row in await cursor.fetchall())
-            if 'bitrix_user_id' not in eng_columns:
-                await self.conn.execute("ALTER TABLE engineers ADD COLUMN bitrix_user_id INTEGER")
-                await self.conn.commit()
+            # Применяем версионированные (пост-релизные) миграции.
+            await run_migrations(self.conn)
 
     # Engineer CRUD
     async def add_engineer(self, user_id: int, name: str):
@@ -309,14 +298,17 @@ class Database:
             return cursor.rowcount > 0
 
     async def close_ticket(self, ticket_id: int, status: str, comment: str = None) -> bool:
+        """Закрывает заявку. Возвращает True, если заявка была закрыта (False — если уже закрыта)."""
         async with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            await self.conn.execute(
-                "UPDATE tickets SET status = ?, close_comment = ?, closed_at = ? WHERE id = ?",
+            # Проверяем, что заявка ещё не закрыта (защита от повторного закрытия)
+            cursor = await self.conn.execute(
+                "UPDATE tickets SET status = ?, close_comment = ?, closed_at = ? "
+                "WHERE id = ? AND status IN ('open', 'in_progress')",
                 (status, comment, now, ticket_id)
             )
             await self.conn.commit()
-            return True
+            return cursor.rowcount > 0
 
     async def get_active_ticket_for_client(self, client_id: int) -> aiosqlite.Row | None:
         async with self.lock:
@@ -326,12 +318,12 @@ class Database:
             )
             return await cursor.fetchone()
 
-    async def get_client_tickets(self, client_id: int, limit: int = 10) -> list[aiosqlite.Row]:
-        """Возвращает историю заявок клиента (последние N)."""
+    async def get_client_tickets(self, client_id: int, limit: int = 10, offset: int = 0) -> list[aiosqlite.Row]:
+        """Возвращает историю заявок клиента (последние N, с пагинацией offset)."""
         async with self.lock:
             cursor = await self.conn.execute(
-                "SELECT * FROM tickets WHERE client_id = ? ORDER BY id DESC LIMIT ?",
-                (client_id, limit)
+                "SELECT * FROM tickets WHERE client_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (client_id, limit, offset)
             )
             return await cursor.fetchall()
 
@@ -356,6 +348,29 @@ class Database:
             cursor = await self.conn.execute("SELECT * FROM tickets")
             return await cursor.fetchall()
 
+    async def get_ticket_status_counts(self) -> dict:
+        """
+        Возвращает количество заявок по статусам одним SQL-запросом,
+        не загружая все строки в память (оптимизация для статистики).
+        """
+        async with self.lock:
+            cursor = await self.conn.execute(
+                """
+                SELECT status, COUNT(*) as cnt
+                FROM tickets
+                GROUP BY status
+                """
+            )
+            rows = await cursor.fetchall()
+            counts = {row['status']: row['cnt'] for row in rows}
+            return {
+                'total': sum(counts.values()),
+                'open': counts.get('open', 0),
+                'in_progress': counts.get('in_progress', 0),
+                'completed': counts.get('completed', 0),
+                'canceled': counts.get('canceled', 0),
+            }
+
     async def get_tickets_by_period(self, start_date: str, end_date: str) -> list[aiosqlite.Row]:
         """Возвращает заявки, созданные в заданном периоде (ISO-даты)."""
         async with self.lock:
@@ -376,6 +391,43 @@ class Database:
                 (cutoff,)
             )
             return await cursor.fetchall()
+
+    async def get_expired_open_tickets_not_escalated(self, timeout_seconds: int) -> list[aiosqlite.Row]:
+        """
+        Возвращает просроченные заявки, по которым ещё НЕ отправлялось
+        уведомление администраторам (дедупликация спама из фоновой задачи).
+        """
+        async with self.lock:
+            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=timeout_seconds)).isoformat()
+            cursor = await self.conn.execute(
+                """
+                SELECT t.* FROM tickets t
+                LEFT JOIN ticket_escalations e ON e.ticket_id = t.id
+                WHERE t.status = 'open' AND t.engineer_id IS NULL
+                  AND t.created_at < ? AND e.ticket_id IS NULL
+                """,
+                (cutoff,)
+            )
+            return await cursor.fetchall()
+
+    async def mark_ticket_escalated(self, ticket_id: int) -> None:
+        """Отмечает, что по просроченной заявке уже отправлено уведомление."""
+        async with self.lock:
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO ticket_escalations (ticket_id, notified_at) VALUES (?, ?)",
+                (ticket_id, now)
+            )
+            await self.conn.commit()
+
+    async def clear_ticket_escalations(self, ticket_id: int) -> None:
+        """Снимает отметку эскалации (например, при повторном открытии заявки)."""
+        async with self.lock:
+            await self.conn.execute(
+                "DELETE FROM ticket_escalations WHERE ticket_id = ?",
+                (ticket_id,)
+            )
+            await self.conn.commit()
 
     # Ratings CRUD
     async def save_rating(self, ticket_id: int, client_id: int, rating: int, comment: str = None):
