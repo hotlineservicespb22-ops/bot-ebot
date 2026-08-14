@@ -23,6 +23,10 @@ htmlcov/
 *.log
 bot.log
 
+# Watchdog / heartbeat (runtime-файлы, создаются при работе бота)
+.heartbeat
+.watchdog_conflict_stamp
+
 # Virtual environments
 venv/
 env/

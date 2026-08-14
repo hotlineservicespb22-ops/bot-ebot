@@ -124,6 +124,7 @@ class TestTicketTimeoutWatcher:
         # Симулируем просроченную заявку
         expired_ticket = {
             "id": ticket_id,
+            "client_id": 123456789,
             "company_city": "Москва",
             "machine_info": "Станок",
             "problem": "Поломка",

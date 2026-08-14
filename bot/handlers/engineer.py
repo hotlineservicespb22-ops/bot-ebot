@@ -107,7 +107,13 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
                 f"📝 [B]Проблема:[/B] {html.escape(str(ticket_dict.get('problem') or '—'))}\n\n"
                 f"📌 [B]Задача:[/B] {task_ref}"
             )
-            await send_message_to_chat(chat_msg)
+            sent = await send_message_to_chat(chat_msg)
+            if not sent:
+                logger.warning(
+                    f"Не удалось отправить уведомление в чат Битрикс24 о заявке #{ticket_id} "
+                    f"(send_message_to_chat вернул False — проверьте BITRIX_CHAT_ID, "
+                    f"BITRIX_FROM_USER_ID и членство пользователя в чате)."
+                )
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление в чат Битрикс24 о заявке #{ticket_id}: {e}")
 

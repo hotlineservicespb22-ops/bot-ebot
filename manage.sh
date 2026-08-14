@@ -14,6 +14,7 @@ ensure_files() {
     [[ -f bot.log ]] || touch bot.log
     [[ -f hotline_service.db ]] || touch hotline_service.db
     [[ -f .env.txt ]] || touch .env.txt
+    [[ -f .heartbeat ]] || touch .heartbeat
     [[ -d media ]] || mkdir -p media
 }
 

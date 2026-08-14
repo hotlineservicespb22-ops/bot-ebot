@@ -1,12 +1,15 @@
 import asyncio
+import datetime
 import html
 import logging
+import os
 import signal
 import sys
 import traceback
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -168,7 +171,11 @@ async def main():
 
     # Bot and Dispatcher initialization
     # Глобальная настройка HTML-разметки: все сообщения по умолчанию парсятся как HTML
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # Ограничиваем таймаут HTTP-запросов к Telegram: если long-poll (getUpdates) «зависнет»
+    # на сетевом уровне, aiohttp оборвёт запрос, aiogram залогирует ошибку и повторит
+    # запрос с backoff — бот не останется навсегда без обновлений.
+    session = AiohttpSession(timeout=30)
+    bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=get_storage())
 
     # Устанавливаем меню команд (общие + админские)
@@ -191,6 +198,10 @@ async def main():
 
     # Запускаем фоновую задачу контроля таймаутов заявок
     timeout_task = asyncio.create_task(ticket_timeout_watcher(bot, db))
+    # Фоновая задача-«пульс»: регулярно обновляет .heartbeat. Внешний watchdog
+    # (watchdog.sh) по этому файлу определяет, жив ли event loop, и при зависании
+    # автоматически перезапускает контейнер.
+    heartbeat_task = asyncio.create_task(heartbeat_writer())
 
     try:
         if WEBHOOK_URL:
@@ -222,6 +233,7 @@ async def main():
         logger.critical(f"Критическая ошибка при запуске: {type(e).__name__}: {e}")
     finally:
         timeout_task.cancel()
+        heartbeat_task.cancel()
         if WEBHOOK_URL:
             await bot.delete_webhook()
         await shutdown()
@@ -257,7 +269,7 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
                         logger.warning(f"Не удалось уведомить админа {admin_id} о просроченной заявке #{ticket['id']}: {e}")
 
                 # Уведомляем самого клиента о том, что заявка ещё не принята в работу
-                if ticket.get('client_id'):
+                if ticket['client_id']:
                     try:
                         await bot.send_message(
                             ticket['client_id'],
@@ -273,6 +285,29 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
         except Exception as e:
             logger.error(f"Ошибка в фоновой задаче timeout-проверки: {e}")
         await asyncio.sleep(check_interval)
+
+
+async def heartbeat_writer():
+    """
+    Периодически пишет текущее время (UTC) в файл .heartbeat.
+
+    Файл служит «пульсом» бота: даже если входящих сообщений нет, задача
+    продолжает обновлять файл, пока работает event loop. Внешний watchdog
+    (watchdog.sh) перезапускает контейнер, если heartbeat не обновлялся дольше
+    заданного лимита (по умолчанию 120 секунд).
+    """
+    heartbeat_file = os.getenv("HEARTBEAT_FILE", ".heartbeat")
+    try:
+        interval = int(os.getenv("HEARTBEAT_INTERVAL", "5"))
+    except ValueError:
+        interval = 5
+    while True:
+        try:
+            with open(heartbeat_file, "w", encoding="utf-8") as f:
+                f.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
+        except OSError as e:
+            logger.warning(f"Heartbeat: не удалось записать {heartbeat_file}: {e}")
+        await asyncio.sleep(interval)
 
 
 async def shutdown():

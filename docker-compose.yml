@@ -19,6 +19,8 @@ services:
       - ./bot.log:/app/bot.log
       - ./media:/app/media
       - ./.env.txt:/app/.env.txt
+      # Файл-«пульс» бота: watchdog на хосте читает его для определения зависания
+      - ./.heartbeat:/app/.heartbeat
     # Healthcheck: проверяем, что контейнер жив (процесс бота). Полезен для оркестраторов.
     healthcheck:
       test: ["CMD", "python", "-c", "import os,sys; sys.exit(0 if os.path.exists('/app/hotline_service.db') else 1)"]

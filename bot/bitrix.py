@@ -259,10 +259,13 @@ async def send_message_to_chat(text: str, chat_id: int | None = None) -> bool:
 
     url = f"{BITRIX_WEBHOOK_URL.rstrip('/')}/im.message.add.json"
     payload = {"DIALOG_ID": target_chat, "MESSAGE": text}
-    # Отправляем от имени указанного пользователя, если он задан
+    # Отправляем от имени указанного пользователя, если он задан.
+    # ВАЖНО: im.message.add принимает параметр USER_ID (а не FROM_USER_ID).
+    # FROM_USER_ID Битрикс24 игнорирует — сообщение уходит от владельца вебхука,
+    # который может не состоять в целевом чате, из-за чего уведомление не доходит.
     if BITRIX_FROM_USER_ID:
         try:
-            payload["FROM_USER_ID"] = int(BITRIX_FROM_USER_ID)
+            payload["USER_ID"] = int(BITRIX_FROM_USER_ID)
         except ValueError:
             logger.warning(f"Некорректное значение BITRIX_FROM_USER_ID: {BITRIX_FROM_USER_ID}")
     # SYSTEM=Y позволяет отправлять сообщения от имени системы (бота) без участия в чате

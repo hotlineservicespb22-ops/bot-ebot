@@ -234,6 +234,17 @@ class TestSendMessageToChat:
              patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"):
             assert await bitrix.send_message_to_chat("hello") is False
 
+    async def test_sender_maps_to_user_id_param(self, mock_session):
+        """Отправитель должен передаваться в параметре USER_ID, а не FROM_USER_ID."""
+        mock_session.add_response({"result": True})
+        with patch.object(bitrix, "BITRIX_CHAT_ID", "chat123"), \
+             patch.object(bitrix, "BITRIX_WEBHOOK_URL", "https://crm.test/rest/1/token/"), \
+             patch.object(bitrix, "BITRIX_FROM_USER_ID", "78"):
+            assert await bitrix.send_message_to_chat("hello") is True
+            payload = mock_session.post_calls[0][1]["json"]
+            assert payload["USER_ID"] == 78
+            assert "FROM_USER_ID" not in payload
+
 
 # ===================== Тесты create_task =====================
 

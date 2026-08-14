@@ -134,8 +134,9 @@ async def cmd_del_admin(message: Message, db: Database):
 @router.message(Command("list_admin"))
 async def cmd_list_admin(message: Message, db: Database, is_admin: bool, edit: bool = False):
     """Показывает список всех администраторов (из .env и БД)."""
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    if not await db.is_admin(message.from_user.id):
+    # В edit-режиме message — это сообщение бота (панель), поэтому message.from_user —
+    # сам бот, а не кликнувший админ. Права берём из аргумента is_admin.
+    if not is_admin:
         if not edit:
             await message.answer("🚫 У вас нет прав администратора.")
         return
@@ -214,8 +215,7 @@ async def cmd_del_engineer(message: Message, db: Database, is_admin: bool):
 
 @router.message(Command("list_eng"))
 async def cmd_list_engineers(message: Message, db: Database, is_admin: bool, edit: bool = False):
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    if not await db.is_admin(message.from_user.id):
+    if not is_admin:
         if not edit:
             await message.answer("🚫 У вас нет прав администратора.")
         return
@@ -387,8 +387,8 @@ def generate_csv(tickets):
 
 @router.message(Command("export"))
 async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin: bool, edit: bool = False):
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    if not await db.is_admin(message.from_user.id):
+    # В edit-режиме message — это сообщение бота (панель), поэтому права берём из is_admin.
+    if not is_admin:
         if not edit:
             await message.answer("🚫 У вас нет прав администратора.")
         return
@@ -449,8 +449,8 @@ async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin:
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, db: Database, is_admin: bool, edit: bool = False):
     """Выводит статистику по заявкам (с агрегацией в SQL)."""
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    if not await db.is_admin(message.from_user.id):
+    # В edit-режиме message — это сообщение бота (панель), поэтому права берём из is_admin.
+    if not is_admin:
         if not edit:
             await message.answer("🚫 У вас нет прав администратора.")
         return
