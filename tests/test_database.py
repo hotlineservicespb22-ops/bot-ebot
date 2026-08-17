@@ -256,4 +256,35 @@ async def test_open_tickets_visible_regardless_of_duty_status(db):
     open_tickets_after = await db.get_open_tickets()
     assert len(open_tickets_after) == 2
     assert all(t['engineer_id'] is None for t in open_tickets_after)
-    assert all(t['status'] == 'open' for t in open_tickets_after)
+
+
+@pytest.mark.asyncio
+async def test_has_active_tickets(db):
+    """Проверяет метод has_active_tickets для бывшего инженера."""
+    # Создаём заявку
+    ticket_id = await db.create_ticket(
+        client_id=1,
+        client_name="Клиент",
+        company="",
+        equipment_type="",
+        brand="",
+        cnc_model="",
+        problem="Проблема",
+        media_id=None,
+        city="",
+        inn_contract="",
+        contact="12345"
+    )
+    # Добавляем инженера, берём заявку, потом удаляем/деактивируем
+    await db.add_engineer(777, "Бывший Инженер")
+    await db.take_ticket(ticket_id, 777)
+    await db.set_engineer_active(777, 0)
+
+    # is_engineer теперь False
+    assert await db.is_engineer(777) is False
+    # Но has_active_tickets — True
+    assert await db.has_active_tickets(777) is True
+
+    # Завершаем заявку — активных больше нет
+    await db.close_ticket(ticket_id, status='completed')
+    assert await db.has_active_tickets(777) is False

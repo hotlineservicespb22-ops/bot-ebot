@@ -39,6 +39,8 @@ _last_ticket_start: dict[int, float] = {}
 _ANTISPAM_MAX_SIZE = 1000
 # TTL записей антиспама (секунды): записи старше этого значения удаляются.
 _ANTISPAM_TTL = max(TICKET_CREATE_COOLDOWN * 10, 600)
+# Максимальный размер файла при создании заявки (20 МБ — лимит Telegram Bot API)
+_MAX_MEDIA_SIZE = 20 * 1024 * 1024
 
 
 def _cleanup_antispam_dict(now: float) -> None:
@@ -445,9 +447,16 @@ async def ticket_problem_media(message: Message, state: FSMContext, bot: Bot):
     media_id = None
     media_type = None
     if message.photo:
+        # Проверяем размер файла до сохранения
+        if message.photo[-1].file_size and message.photo[-1].file_size > _MAX_MEDIA_SIZE:
+            await message.answer("❌ Файл слишком большой (лимит 20 МБ). Пожалуйста, пришлите файл меньшего размера.")
+            return
         media_id = message.photo[-1].file_id
         media_type = 'photo'
     elif message.video:
+        if message.video.file_size and message.video.file_size > _MAX_MEDIA_SIZE:
+            await message.answer("❌ Файл слишком большой (лимит 20 МБ). Пожалуйста, пришлите файл меньшего размера.")
+            return
         media_id = message.video.file_id
         media_type = 'video'
 
@@ -488,9 +497,15 @@ async def ticket_machine_info(message: Message, state: FSMContext, bot: Bot):
     machine_media_id = None
     machine_media_type = None
     if message.photo:
+        if message.photo[-1].file_size and message.photo[-1].file_size > _MAX_MEDIA_SIZE:
+            await message.answer("❌ Файл слишком большой (лимит 20 МБ). Пожалуйста, пришлите файл меньшего размера.")
+            return
         machine_media_id = message.photo[-1].file_id
         machine_media_type = 'photo'
     elif message.video:
+        if message.video.file_size and message.video.file_size > _MAX_MEDIA_SIZE:
+            await message.answer("❌ Файл слишком большой (лимит 20 МБ). Пожалуйста, пришлите файл меньшего размера.")
+            return
         machine_media_id = message.video.file_id
         machine_media_type = 'video'
 

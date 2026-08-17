@@ -67,11 +67,22 @@ async def _migration_v4_ticket_escalations(conn) -> None:
     """)
 
 
+async def _migration_v5_ticket_engineer_index(conn) -> None:
+    """
+    v5: Индекс на engineer_id в таблице tickets.
+
+    Ускоряет запросы has_active_tickets, get_active_tickets_for_engineer
+    и get_engineer_stats при большом количестве заявок.
+    """
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_engineer_id ON tickets(engineer_id)")
+
+
 # Реестр миграций: version -> (название, функция)
 MIGRATIONS = {
     2: ("ticket_extra_fields", _migration_v2_ticket_fields),
     3: ("engineer_bitrix_user_id", _migration_v3_engineer_bitrix),
     4: ("ticket_escalations", _migration_v4_ticket_escalations),
+    5: ("ticket_engineer_index", _migration_v5_ticket_engineer_index),
 }
 
 

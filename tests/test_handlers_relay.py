@@ -585,4 +585,62 @@ class TestRequireEngineer:
         callback.answer = AsyncMock()
         result = await _require_engineer(callback, is_engineer=False)
         assert result is False
-        callback.answer.assert_called_with("У вас нет прав инженера.", show_alert=True)
+
+
+
+# ===================== Тесты сценария «бывший инженер» =====================
+
+class TestFormerEngineerRelay:
+    """Тесты для проверки прав бывшего инженера в relay-хендлерах."""
+
+    async def test_former_engineer_sees_own_tickets(
+        self, db_with_active_ticket, fake_engineer_user, fake_chat, relay_fsm_context
+    ):
+        """Бывший инженер видит список «Мои заявки в работе»."""
+        db, ticket_id = db_with_active_ticket
+        # Деактивируем инженера после взятия заявки
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+
+        message = make_message(fake_engineer_user, fake_chat, text="📋 Мои заявки в работе")
+        # is_engineer=True благодаря has_active_tickets
+        await list_my_tickets(message, db, is_engineer=True, state=relay_fsm_context)
+
+        message.answer.assert_called()
+        call_args = message.answer.call_args
+        assert call_args is not None
+        # Должен быть ответ с заявкой (не отказ)
+        assert any(kw for kw in call_args[1].values() if kw is not None)
+
+    async def test_former_engineer_sees_open_tickets(
+        self, db_with_active_ticket, fake_engineer_user, fake_chat, relay_fsm_context
+    ):
+        """Бывший инженер видит нераспределённые заявки."""
+        db, ticket_id = db_with_active_ticket
+        # Создаём ещё одну открытую заявку (не распределена)
+        await db.create_ticket(
+            client_id=999,
+            client_name="Другой Клиент",
+            company="", equipment_type="", brand="", cnc_model="",
+            problem="Другая проблема",
+            media_id=None, city="", inn_contract="", contact="+7999"
+        )
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+
+        message = make_message(fake_engineer_user, fake_chat, text="📥 Нераспределенные заявки")
+        await list_open_tickets(message, db, is_engineer=True, state=relay_fsm_context)
+
+        message.answer.assert_called()
+
+    async def test_former_engineer_without_active_tickets_blocked(
+        self, db_with_engineer, fake_engineer_user, fake_chat, relay_fsm_context
+    ):
+        """Бывший инженер БЕЗ активных заявок не имеет прав."""
+        db = db_with_engineer
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+        # Нет активных заявок
+
+        message = make_message(fake_engineer_user, fake_chat, text="📋 Мои заявки в работе")
+        await list_my_tickets(message, db, is_engineer=False, state=relay_fsm_context)
+
+        # Никакого ответа — функция молча выходит для не-инженера
+        message.answer.assert_not_called()

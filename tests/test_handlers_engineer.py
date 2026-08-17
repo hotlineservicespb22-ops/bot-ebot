@@ -599,3 +599,113 @@ class TestCreateBitrixTask:
             result = await _create_bitrix_task_for_ticket(db, ticket)
             assert result is None
             mock_create.assert_called_once()
+
+
+
+# ===================== Тесты сценария «бывший инженер» =====================
+
+class TestFormerEngineer:
+    """Тесты для проверки прав бывшего инженера с активными заявками."""
+
+    async def test_former_engineer_cannot_take_new_ticket(
+        self, db_with_open_ticket, fake_engineer_user, engineer_fsm_context, mock_bot
+    ):
+        """Бывший инженер НЕ может взять новую заявку."""
+        db, ticket_id = db_with_open_ticket
+        await db.add_engineer(fake_engineer_user.id, "Инженер Тест")
+        # Деактивируем инженера
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+
+        callback_data = TicketCallback(action="take", ticket_id=ticket_id)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.answer = AsyncMock()
+
+        # is_engineer=True (из-за middleware), но прямая проверка db.is_engineer() не пройдёт
+        await take_ticket(callback, callback_data, mock_bot, db, is_engineer=True, state=engineer_fsm_context)
+
+        callback.answer.assert_called_with("У вас нет прав инженера.", show_alert=True)
+        ticket = await db.get_ticket(ticket_id)
+        assert ticket["status"] == "open"
+
+    async def test_former_engineer_completes_own_ticket(
+        self, db_with_open_ticket, fake_engineer_user, fake_user, engineer_fsm_context, mock_bot
+    ):
+        """Бывший инженер может завершить свою заявку."""
+        db, ticket_id = db_with_open_ticket
+        await db.add_engineer(fake_engineer_user.id, "Инженер Тест")
+        await db.take_ticket(ticket_id, fake_engineer_user.id)
+        # Деактивируем инженера ПОСЛЕ взятия
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+
+        callback_data = TicketCallback(action="complete", ticket_id=ticket_id)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.message = AsyncMock()
+        callback.message.caption = None
+        callback.message.html_text = "Тест"
+        callback.message.edit_text = AsyncMock()
+        callback.message.answer = AsyncMock()
+        callback.answer = AsyncMock()
+
+        # is_engineer=True благодаря has_active_tickets в middleware
+        await complete_ticket_by_engineer(callback, callback_data, mock_bot, db, engineer_fsm_context, is_engineer=True)
+
+        ticket = await db.get_ticket(ticket_id)
+        assert ticket["status"] == "completed"
+
+    async def test_former_engineer_cancels_own_ticket(
+        self, db_with_open_ticket, fake_engineer_user, engineer_fsm_context, mock_bot
+    ):
+        """Бывший инженер может отменить свою заявку."""
+        db, ticket_id = db_with_open_ticket
+        await db.add_engineer(fake_engineer_user.id, "Инженер Тест")
+        await db.take_ticket(ticket_id, fake_engineer_user.id)
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+
+        callback_data = TicketCallback(action="eng_cancel", ticket_id=ticket_id)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.message = AsyncMock()
+        callback.message.caption = None
+        callback.message.html_text = "Тест"
+        callback.message.edit_text = AsyncMock()
+        callback.message.answer = AsyncMock()
+        callback.answer = AsyncMock()
+
+        await cancel_ticket_by_engineer(callback, callback_data, mock_bot, db, engineer_fsm_context, is_engineer=True)
+
+        ticket = await db.get_ticket(ticket_id)
+        assert ticket["status"] == "canceled"
+
+    async def test_former_engineer_completes_via_menu(
+        self, db_with_open_ticket, fake_engineer_user, fake_chat, engineer_fsm_context, mock_bot
+    ):
+        """Бывший инженер завершает заявку через меню."""
+        db, ticket_id = db_with_open_ticket
+        await db.add_engineer(fake_engineer_user.id, "Инженер Тест")
+        await db.take_ticket(ticket_id, fake_engineer_user.id)
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+        await engineer_fsm_context.update_data(active_ticket_id=ticket_id)
+
+        message = make_message(fake_engineer_user, fake_chat, text="✅ Завершить текущую")
+        await complete_current_ticket_via_menu(message, mock_bot, db, engineer_fsm_context, is_engineer=True)
+
+        ticket = await db.get_ticket(ticket_id)
+        assert ticket["status"] == "completed"
+
+    async def test_former_engineer_cancels_via_menu(
+        self, db_with_open_ticket, fake_engineer_user, fake_chat, engineer_fsm_context, mock_bot
+    ):
+        """Бывший инженер отменяет заявку через меню."""
+        db, ticket_id = db_with_open_ticket
+        await db.add_engineer(fake_engineer_user.id, "Инженер Тест")
+        await db.take_ticket(ticket_id, fake_engineer_user.id)
+        await db.set_engineer_active(fake_engineer_user.id, 0)
+        await engineer_fsm_context.update_data(active_ticket_id=ticket_id)
+
+        message = make_message(fake_engineer_user, fake_chat, text="🚫 Отменить текущую")
+        await cancel_current_ticket_via_menu(message, mock_bot, db, engineer_fsm_context, is_engineer=True)
+
+        ticket = await db.get_ticket(ticket_id)
+        assert ticket["status"] == "canceled"

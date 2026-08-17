@@ -195,6 +195,15 @@ class Database:
             cursor = await self.conn.execute("SELECT 1 FROM engineers WHERE user_id = ? AND is_active = 1", (user_id,))
             return await cursor.fetchone() is not None
 
+    async def has_active_tickets(self, user_id: int) -> bool:
+        """Проверяет, есть ли у пользователя активные заявки (in_progress) как у инженера."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "SELECT 1 FROM tickets WHERE engineer_id = ? AND status = 'in_progress' LIMIT 1",
+                (user_id,)
+            )
+            return await cursor.fetchone() is not None
+
     async def set_bitrix_user_id(self, user_id: int, bitrix_user_id: int):
         """Устанавливает соответствие инженера бота пользователю Битрикс24."""
         async with self.lock:
@@ -205,20 +214,28 @@ class Database:
             await self.conn.commit()
 
     async def get_bitrix_user_id(self, user_id: int) -> int | None:
-        """Возвращает ID пользователя Битрикс24 для инженера (или None)."""
+        """Возвращает ID пользователя Битрикс24 для инженера (или None).
+
+        Не фильтрует по is_active — бывший инженер должен иметь
+        возможность работать с уже созданной задачей Битрикс24.
+        """
         async with self.lock:
             cursor = await self.conn.execute(
-                "SELECT bitrix_user_id FROM engineers WHERE user_id = ? AND is_active = 1",
+                "SELECT bitrix_user_id FROM engineers WHERE user_id = ?",
                 (user_id,)
             )
             row = await cursor.fetchone()
             return row['bitrix_user_id'] if row and row['bitrix_user_id'] is not None else None
 
     async def get_engineer_name(self, user_id: int) -> str | None:
-        """Возвращает имя инженера по его Telegram ID (или None)."""
+        """Возвращает имя инженера по его Telegram ID (или None).
+
+        Не фильтрует по is_active — бывший инженер с активными заявками
+        должен отображаться под своим именем в чате с клиентом.
+        """
         async with self.lock:
             cursor = await self.conn.execute(
-                "SELECT name FROM engineers WHERE user_id = ? AND is_active = 1",
+                "SELECT name FROM engineers WHERE user_id = ?",
                 (user_id,)
             )
             row = await cursor.fetchone()

@@ -34,8 +34,12 @@ class RoleMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         db: Database = data["db"]
+        is_in_engineers_table = await db.is_engineer(user.id)
+        has_active = await db.has_active_tickets(user.id)
         data["is_admin"] = await db.is_admin(user.id)
-        data["is_engineer"] = await db.is_engineer(user.id)
+        # Инженер — это либо действующий инженер из таблицы engineers (is_active=1),
+        # либо бывший инженер, у которого остались активные заявки в работе.
+        data["is_engineer"] = is_in_engineers_table or has_active
         
         return await handler(event, data)
 

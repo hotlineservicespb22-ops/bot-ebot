@@ -40,14 +40,10 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
         # Update message to show current status if possible
         current_ticket = await db.get_ticket(ticket_id)
         if current_ticket and current_ticket['status'] == 'in_progress':
-            # Try to find engineer name
+            # Попытка найти имя инженера, который уже взял заявку
             engineer_name = "Неизвестный инженер"
             if current_ticket['engineer_id']:
-                engineers = await db.get_engineers()
-                for eng in engineers:
-                    if eng['user_id'] == current_ticket['engineer_id']:
-                        engineer_name = eng['name']
-                        break
+                engineer_name = await db.get_engineer_name(current_ticket['engineer_id']) or engineer_name
             # Обновляем сообщение (учитываем медиа-сообщения: фото/видео)
             try:
                 already_taken_suffix = "\n\n👨‍🔧 <b>Заявка уже в работе</b>"
@@ -235,8 +231,8 @@ async def _send_pre_assign_client_messages(bot: Bot, db: Database, ticket_id: in
 
 @router.callback_query(TicketCallback.filter(F.action == "complete"))
 async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, state: FSMContext, is_engineer: bool):
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    if not await db.is_engineer(callback.from_user.id):
+    # Проверка прав: инженер (включая бывшего с активными заявками)
+    if not is_engineer:
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
@@ -333,8 +329,8 @@ async def cancel_current_ticket_via_menu(message: Message, bot: Bot, db: Databas
 
 @router.callback_query(TicketCallback.filter(F.action == "eng_cancel"))
 async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, state: FSMContext, is_engineer: bool):
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    if not await db.is_engineer(callback.from_user.id):
+    # Проверка прав: инженер (включая бывшего с активными заявками)
+    if not is_engineer:
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
