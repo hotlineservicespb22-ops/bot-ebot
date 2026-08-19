@@ -146,6 +146,49 @@ def generate_dashboard(data_json: str) -> str:
         parts.append('<tr><td>' + _html.escape(str(c['city'])) + '</td><td>' + str(c['cnt']) + '</td></tr>')
     parts.append('</tbody></table></div>')
 
+    # Переписка по заявкам
+    tickets = d.get('tickets_with_chat', [])
+    if tickets:
+        parts.append('<div class="card"><h2>📜 Переписка по заявкам</h2>')
+        parts.append('<p style="font-size:11px;opacity:.6;margin-bottom:8px">Кликните по заявке чтобы развернуть переписку</p>')
+        for tk in tickets:
+            status_cls = tk['status']
+            status_map = {'open': 'Открыта', 'in_progress': 'В работе', 'completed': 'Завершена', 'canceled': 'Отменена'}
+            status_label = status_map.get(tk['status'], tk['status'])
+            chat_html = ''
+            for msg in tk['chat']:
+                icon = '👤' if msg['role'] == 'client' else '👨‍🔧'
+                role = 'Клиент' if msg['role'] == 'client' else 'Инженер'
+                chat_html += (
+                    '<div style="margin:6px 0;padding:6px 10px;background:rgba(255,255,255,.03);border-radius:6px;'
+                    'border-left:3px solid ' + ('#f5a623' if msg['role'] == 'client' else '#4361ee') + '">'
+                    '<span style="font-size:10px;opacity:.5">' + _html.escape(msg['time']) + ' ' + icon + ' ' + role + '</span><br>'
+                    '<span style="font-size:13px">' + _html.escape(msg['text']) + '</span>'
+                    '</div>'
+                )
+            comment_line = ''
+            if tk['comment']:
+                comment_line = '<br><span style="font-size:11px;opacity:.6">💬 ' + _html.escape(tk['comment']) + '</span>'
+            parts.append(
+                '<details style="margin-bottom:6px">'
+                '<summary style="cursor:pointer;padding:8px 10px;background:rgba(255,255,255,.04);border-radius:6px;font-size:13px">'
+                '<b>#' + str(tk['id']) + '</b> '
+                '<span class="stars">' + tk['stars'] + '</span> '
+                + _html.escape(tk['engineer']) + ' · '
+                + _html.escape(tk['machine'][:30]) + ' · '
+                + '<span style="font-size:11px;opacity:.6">' + _html.escape(tk['created']) + '</span>'
+                + '</summary>'
+                '<div style="padding:8px 10px;font-size:12px">'
+                '<b>Клиент:</b> ' + _html.escape(tk['client']) + ' · ' + _html.escape(tk['city']) + '<br>'
+                '<b>Проблема:</b> ' + _html.escape(tk['problem']) + '<br>'
+                '<b>Статус:</b> ' + status_label + ' | Оценка: ' + tk['stars'] + ' (' + str(tk['rating']) + '/5)'
+                + comment_line +
+                '<div style="margin-top:8px">' + chat_html + '</div>'
+                '</div>'
+                '</details>'
+            )
+        parts.append('</div>')
+
     return '<!DOCTYPE html><html lang="ru"><head>\n<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=3.0,user-scalable=yes">\n<title>Hotline Service - Дашборд</title>\n<style>' + CSS + '</style></head><body>\n<h1>Hotline Service</h1>\n' + '\n'.join(parts) + '\n</body></html>'
 
 if __name__ == '__main__':

@@ -748,6 +748,51 @@ class Database:
                 "SELECT COUNT(DISTINCT client_id) as total, COUNT(DISTINCT CASE WHEN tc>1 THEN client_id END) as rep FROM (SELECT client_id,COUNT(*) as tc FROM tickets GROUP BY client_id)")
             rep = await cursor.fetchone()
         
+# Заявки с перепиской для дашборда (последние 30, любые статусы)
+            cursor = await self.conn.execute("""
+                SELECT t.id, t.client_name, t.company_city, t.machine_info,
+                    t.problem, t.status, t.created_at,
+                    e.name as engineer_name,
+                    r.rating, r.comment as rating_comment
+                FROM tickets t
+                LEFT JOIN engineers e ON t.engineer_id = e.user_id
+                LEFT JOIN ratings r ON t.id = r.ticket_id
+                ORDER BY t.id DESC LIMIT 30
+            """)
+            tickets_raw = await cursor.fetchall()
+
+            tickets_with_chat = []
+            for tk in tickets_raw:
+                c = await self.conn.execute(
+                    "SELECT sender_role, text, created_at FROM messages "
+                    "WHERE ticket_id = ? AND (media_type IS NULL OR media_type = '') "
+                    "ORDER BY created_at ASC",
+                    (tk['id'],)
+                )
+                msgs = await c.fetchall()
+                chat = [
+                    {
+                        'role': m['sender_role'],
+                        'text': m['text'] or '',
+                        'time': (m['created_at'] or '')[:16].replace('T', ' ')
+                    }
+                    for m in msgs
+                ]
+                stars = '★' * (tk['rating'] or 0)
+                tickets_with_chat.append({
+                    'id': tk['id'],
+                    'status': tk['status'],
+                    'client': tk['client_name'] or '—',
+                    'city': tk['company_city'] or '—',
+                    'machine': tk['machine_info'] or '—',
+                    'problem': tk['problem'] or '—',
+                    'engineer': tk['engineer_name'] or '—',
+                    'stars': stars,
+                    'rating': tk['rating'] or 0,
+                    'comment': tk['rating_comment'] or '',
+                    'created': (tk['created_at'] or '')[:10],
+                    'chat': chat,
+                })
         return {
             'total': row['total'],
             'open': row['open_count'],
@@ -770,6 +815,7 @@ class Database:
             'dow_load': dow_load, 'day_names': day_names,
             'repeat_pct': round((rep['rep'] or 0) / max(rep['total'] or 1, 1) * 100),
             'total_clients': rep['total'] or 0, 'repeat_clients': rep['rep'] or 0,
+            'tickets_with_chat': tickets_with_chat,
         }
 
     async def get_engineer_stats(self) -> list[aiosqlite.Row]:
