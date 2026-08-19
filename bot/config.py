@@ -29,6 +29,17 @@ for x in cleaned_str.split(","):
 
 logging.getLogger("bot.config").info(f"ИТОГОВЫЙ СПИСОК АДМИНОВ: {ADMIN_IDS}")
 
+raw_manager_ids = os.getenv("MANAGER_IDS", "")
+cleaned_mgr = str(raw_manager_ids).translate(str.maketrans("", "", "[]'\"\""))
+
+MANAGER_IDS = []
+for x in cleaned_mgr.split(","):
+    x = x.strip()
+    if x.isdigit():
+        MANAGER_IDS.append(int(x))
+
+logging.getLogger("bot.config").info(f"ИТОГОВЫЙ СПИСОК РУКОВОДИТЕЛЕЙ: {MANAGER_IDS}")
+
 DB_PATH = os.getenv("DB_PATH", "hotline_service.db")
 # Каталог для сохранения фото/видео материалов заявок (подпапки создаются по номеру заявки)
 MEDIA_DIR = os.getenv("MEDIA_DIR", "media")

@@ -284,7 +284,10 @@ class Database:
             return await cursor.fetchall()
 
     async def is_manager(self, user_id: int) -> bool:
-        # Руководители проверяются только через БД (не через .env)
+        # Проверяем и .env (MANAGER_IDS), и БД
+        from bot.config import MANAGER_IDS
+        if user_id in MANAGER_IDS:
+            return True
         async with self.lock:
             cursor = await self.conn.execute("SELECT 1 FROM managers WHERE user_id = ?", (user_id,))
             return await cursor.fetchone() is not None
