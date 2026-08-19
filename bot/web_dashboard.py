@@ -10,7 +10,6 @@
 """
 
 import html as _html
-import json
 import logging
 
 from aiohttp import web

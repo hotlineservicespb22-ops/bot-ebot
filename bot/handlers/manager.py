@@ -107,10 +107,12 @@ async def _show_ticket_list(callback: CallbackQuery, db: Database, page: int):
     avg_rating = await db.low_rated.avg_rating()
     this_week = await db.low_rated.this_week()
 
+    avg_str = f"{avg_rating:.1f}" if avg_rating is not None else "—"
+
     header = (
         f"📋 <b>Проблемные заявки (оценка ≤ 3)</b>\n"
         f"Всего: <b>{total}</b> | За неделю: <b>{this_week}</b> | "
-        f"Средняя оценка: <b>{avg_rating:.1f if avg_rating else '—'}</b>\n\n"
+        f"Средняя оценка: <b>{avg_str}</b>\n\n"
         "<i>Выберите заявку для просмотра:</i>"
     )
     await _safe_edit(callback, 

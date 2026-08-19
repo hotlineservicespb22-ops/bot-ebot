@@ -152,7 +152,6 @@ def generate_dashboard(data_json: str) -> str:
         parts.append('<div class="card"><h2>📜 Переписка по заявкам</h2>')
         parts.append('<p style="font-size:11px;opacity:.6;margin-bottom:8px">Кликните по заявке чтобы развернуть переписку</p>')
         for tk in tickets:
-            status_cls = tk['status']
             status_map = {'open': 'Открыта', 'in_progress': 'В работе', 'completed': 'Завершена', 'canceled': 'Отменена'}
             status_label = status_map.get(tk['status'], tk['status'])
             chat_html = ''
