@@ -398,18 +398,10 @@ def my_requests_pagination_kb(page: int, total_pages: int):
 
 def manager_menu_kb() -> InlineKeyboardMarkup:
     """Inline-клавиатура панели руководителя."""
-    from bot.config import MANAGER_DASHBOARD_KEY, MANAGER_DASHBOARD_URL
-    dash_url = MANAGER_DASHBOARD_URL
-    if MANAGER_DASHBOARD_KEY:
-        dash_url += f"?key={MANAGER_DASHBOARD_KEY}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="📋 Проблемные заявки (оценка ≤ 3)",
             callback_data=ManagerCallback(action="list").pack()
-        )],
-        [InlineKeyboardButton(
-            text="📊 Открыть веб-дашборд",
-            url=dash_url
         )],
     ])
 
