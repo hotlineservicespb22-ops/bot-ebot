@@ -126,12 +126,12 @@ async def setup_commands(bot: Bot, db: Database):
         except Exception as e:
             logger.warning(f"Не удалось установить команды для админа {admin_id}: {e}")
 
-    # Команды для руководителей из .env (MANAGER_IDS)
+    # Команды для руководителей из .env (MANAGER_IDS) — админские + панель руководителя
     from bot.config import MANAGER_IDS
     for mgr_id in MANAGER_IDS:
         try:
             await bot.set_my_commands(
-                DEFAULT_COMMANDS + MANAGER_COMMANDS,
+                DEFAULT_COMMANDS + ADMIN_COMMANDS + MANAGER_COMMANDS,
                 scope=BotCommandScopeChat(chat_id=mgr_id)
             )
         except Exception as e:
@@ -210,8 +210,8 @@ async def main():
     dp.include_router(admin.router)
     dp.include_router(engineer.router)
     dp.include_router(client.router)
-    dp.include_router(relay.router)
     dp.include_router(manager.router)
+    dp.include_router(relay.router)
 
     # Запускаем веб-дашборд руководителя в фоне
     dashboard_app = create_dashboard_app(db)
