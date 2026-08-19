@@ -267,30 +267,11 @@ class Database:
             cursor = await self.conn.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
             return await cursor.fetchone() is not None
 
-    # Manager CRUD
-    async def add_manager(self, user_id: int):
-        async with self.lock:
-            await self.conn.execute("INSERT OR IGNORE INTO managers (user_id) VALUES (?)", (user_id,))
-            await self.conn.commit()
-
-    async def delete_manager(self, user_id: int):
-        async with self.lock:
-            await self.conn.execute("DELETE FROM managers WHERE user_id = ?", (user_id,))
-            await self.conn.commit()
-
-    async def get_managers(self) -> list[aiosqlite.Row]:
-        async with self.lock:
-            cursor = await self.conn.execute("SELECT * FROM managers")
-            return await cursor.fetchall()
-
+    # Manager check (только через .env)
     async def is_manager(self, user_id: int) -> bool:
-        # Проверяем и .env (MANAGER_IDS), и БД
+        """Проверяет, является ли пользователь руководителем. Только через MANAGER_IDS из .env."""
         from bot.config import MANAGER_IDS
-        if user_id in MANAGER_IDS:
-            return True
-        async with self.lock:
-            cursor = await self.conn.execute("SELECT 1 FROM managers WHERE user_id = ?", (user_id,))
-            return await cursor.fetchone() is not None
+        return user_id in MANAGER_IDS
 
     # Ticket CRUD
     async def create_ticket(
@@ -892,15 +873,6 @@ class Database:
         get_all = property(lambda self: self._db.get_admins)
         is_admin = property(lambda self: self._db.is_admin)
 
-    class _ManagerAccess:
-        """DAO-обёртка для методов работы с руководителями."""
-        def __init__(self, db: "Database"):
-            self._db = db
-        add = property(lambda self: self._db.add_manager)
-        delete = property(lambda self: self._db.delete_manager)
-        get_all = property(lambda self: self._db.get_managers)
-        is_manager = property(lambda self: self._db.is_manager)
-
     class _LowRatedAccess:
         """DAO-обёртка для методов работы с проблемными заявками."""
         def __init__(self, db: "Database"):
@@ -979,10 +951,6 @@ class Database:
     @property
     def admins(self) -> _AdminAccess:
         return self._AdminAccess(self)
-
-    @property
-    def managers(self) -> _ManagerAccess:
-        return self._ManagerAccess(self)
 
     @property
     def low_rated(self) -> _LowRatedAccess:

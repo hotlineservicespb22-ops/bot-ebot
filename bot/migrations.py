@@ -101,27 +101,8 @@ async def _migration_v6_ticket_uuid(conn) -> None:
     await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_uuid ON tickets(uuid)")
 
 
-async def _migration_v8_managers(conn) -> None:
-    """
-    v8: Таблица руководителей (managers).
-
-    Руководители имеют доступ к дашборду проблемных заявок (оценка ≤ 3),
-    но не могут управлять инженерами/админами как администраторы.
-    """
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS managers (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-
-
 async def _migration_v9_low_rated_tickets(conn) -> None:
-    """
-    v9: Таблица «проблемных» заявок (оценка ≤ 3).
-
-    При сохранении оценки ≤ 3 заявка автоматически попадает в эту таблицу.
-    Руководитель видит эти заявки в дашборде с полной историей переписки.
-    """
+    """v9: Таблица «проблемных» заявок (оценка ≤ 3)."""
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS low_rated_tickets (
             ticket_id INTEGER PRIMARY KEY,
@@ -143,7 +124,6 @@ MIGRATIONS = {
     5: ("ticket_engineer_index", _migration_v5_ticket_engineer_index),
     6: ("ticket_uuid", _migration_v6_ticket_uuid),
     7: ("cascade_delete", _migration_v7_cascade_delete),
-    8: ("managers_table", _migration_v8_managers),
     9: ("low_rated_tickets", _migration_v9_low_rated_tickets),
 }
 

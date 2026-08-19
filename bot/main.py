@@ -76,8 +76,6 @@ ADMIN_COMMANDS = [
     BotCommand(command="add_eng", description="➕ Добавить инженера"),
     BotCommand(command="del_eng", description="➖ Удалить инженера"),
     BotCommand(command="bulk_add_eng", description="📦 Массовое добавление инженеров"),
-    BotCommand(command="add_manager", description="➕ Добавить руководителя"),
-    BotCommand(command="del_manager", description="➖ Удалить руководителя"),
 ]
 
 # Команды, доступные руководителям (дополнительно к общим)
@@ -131,20 +129,6 @@ async def setup_commands(bot: Bot, db: Database):
     # Команды для руководителей из .env (MANAGER_IDS)
     from bot.config import MANAGER_IDS
     for mgr_id in MANAGER_IDS:
-        try:
-            await bot.set_my_commands(
-                DEFAULT_COMMANDS + MANAGER_COMMANDS,
-                scope=BotCommandScopeChat(chat_id=mgr_id)
-            )
-        except Exception as e:
-            logger.warning(f"Не удалось установить команды для руководителя {mgr_id}: {e}")
-
-    # Команды для руководителей из БД
-    db_managers = await db.managers.get_all()
-    for row in db_managers:
-        mgr_id = row['user_id']
-        if mgr_id in MANAGER_IDS:
-            continue  # Уже установили выше
         try:
             await bot.set_my_commands(
                 DEFAULT_COMMANDS + MANAGER_COMMANDS,
