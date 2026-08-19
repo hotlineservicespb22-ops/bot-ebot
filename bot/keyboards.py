@@ -318,6 +318,11 @@ class AdminCallback(CallbackData, prefix="admin"):
     action: str
     engineer_id: int = 0
 
+class ManagerCallback(CallbackData, prefix="manager"):
+    action: str
+    ticket_id: int = 0
+    page: int = 0
+
 def admin_menu_kb():
     """Inline-клавиатура админ-панели."""
     buttons = [
@@ -387,3 +392,86 @@ def my_requests_pagination_kb(page: int, total_pages: int):
             ))
         keyboard.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+# ─── Клавиатуры руководителя ───────────────────────────────────
+
+def manager_menu_kb() -> InlineKeyboardMarkup:
+    """Inline-клавиатура панели руководителя."""
+    from bot.config import MANAGER_DASHBOARD_KEY, MANAGER_DASHBOARD_URL
+    dash_url = MANAGER_DASHBOARD_URL
+    if MANAGER_DASHBOARD_KEY:
+        dash_url += f"?key={MANAGER_DASHBOARD_KEY}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 Проблемные заявки (оценка ≤ 3)",
+            callback_data=ManagerCallback(action="list").pack()
+        )],
+        [InlineKeyboardButton(
+            text="📊 Открыть веб-дашборд",
+            url=dash_url
+        )],
+    ])
+
+
+def manager_ticket_list_kb(tickets: list, page: int = 0) -> InlineKeyboardMarkup:
+    """Список проблемных заявок с пагинацией по 5 на страницу."""
+    per_page = 5
+    start = page * per_page
+    chunk = tickets[start:start + per_page]
+    total_pages = max((len(tickets) + per_page - 1) // per_page, 1)
+
+    keyboard = []
+    for t in chunk:
+        stars = "⭐" * t['rating']
+        eng = t['engineer_name'] or "—"
+        label = (
+            f"#{t['id']} {stars} {eng[:15]}"
+        )
+        keyboard.append([InlineKeyboardButton(
+            text=label,
+            callback_data=ManagerCallback(action="detail", ticket_id=t['id']).pack()
+        )])
+
+    # Пагинация
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="⬅️",
+                callback_data=ManagerCallback(action="list", page=page - 1).pack()
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="manager:noop"
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="➡️",
+                callback_data=ManagerCallback(action="list", page=page + 1).pack()
+            ))
+        keyboard.append(nav)
+
+    keyboard.append([InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=ManagerCallback(action="menu").pack()
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def manager_ticket_detail_kb(ticket_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для детального просмотра заявки руководителем."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📜 Показать переписку (без медиа)",
+            callback_data=ManagerCallback(action="chat", ticket_id=ticket_id).pack()
+        )],
+        [InlineKeyboardButton(
+            text="🔙 К списку",
+            callback_data=ManagerCallback(action="list").pack()
+        )],
+        [InlineKeyboardButton(
+            text="🏠 В меню руководителя",
+            callback_data=ManagerCallback(action="menu").pack()
+        )],
+    ])

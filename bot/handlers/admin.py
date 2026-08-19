@@ -8,7 +8,9 @@ import json
 import logging
 
 from aiogram import Bot, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from bot.config import ADMIN_IDS  # Import global ADMIN_IDS
@@ -182,38 +184,160 @@ async def cmd_list_admin(message: Message, db: Database, is_admin: bool, edit: b
     else:
         await message.answer(text, reply_markup=back_to_admin_kb())
 
-# ===================== Управление инженерами =====================
 
-@router.message(Command("add_eng"))
-async def cmd_add_engineer(message: Message, db: Database, is_admin: bool):
-    logger.info(f"Команда /add_eng вызвана пользователем: {message.from_user.id} (is_admin={is_admin})")
+# ═════════════════════════════════════════════════════════════════
+# Команды управления руководителями
+# ═════════════════════════════════════════════════════════════════
 
-    # Явная проверка прав через БД — не полагаемся только на middleware
+
+@router.message(Command("add_manager"))
+async def cmd_add_manager(message: Message, db: Database):
+    """Добавляет руководителя. Доступно только администраторам."""
     is_admin = await db.is_admin(message.from_user.id)
     if not is_admin:
-        logger.warning(f"Доступ к /add_eng запрещен для пользователя {message.from_user.id} (не администратор).")
         await message.answer("🚫 У вас нет прав администратора.")
         return
 
     args = message.text.split()
-    if len(args) < 3:
-        await message.answer("Используйте: <code>/add_eng ID_инженера Имя</code>")
-        return
-    
-    try:
-        eng_id = int(args[1])
-    except ValueError:
-        await message.answer("❌ ID инженера должен быть числом (Telegram ID).")
-        return
-    
-    # Check if the engineer ID is already an admin ID
-    if eng_id in ADMIN_IDS:
-        await message.answer("❌ Этот пользователь уже является администратором. Нет необходимости добавлять его как инженера отдельно, если он уже имеет все права.")
+    if len(args) < 2:
+        await message.answer(
+            "Используйте: <code>/add_manager ID_пользователя</code>"
+        )
         return
 
-    eng_name = " ".join(args[2:])
+    try:
+        manager_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID пользователя должен быть числом (Telegram ID).")
+        return
+
+    await db.managers.add(manager_id)
+    await message.answer(
+        f"✅ Пользователь <code>{manager_id}</code> добавлен в руководители.\n"
+        f"Теперь ему доступна команда /manager."
+    )
+
+
+@router.message(Command("del_manager"))
+async def cmd_del_manager(message: Message, db: Database):
+    """Удаляет руководителя. Доступно только администраторам."""
+    is_admin = await db.is_admin(message.from_user.id)
+    if not is_admin:
+        await message.answer("🚫 У вас нет прав администратора.")
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "Используйте: <code>/del_manager ID_пользователя</code>"
+        )
+        return
+
+    try:
+        manager_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID пользователя должен быть числом.")
+        return
+
+    await db.managers.delete(manager_id)
+    await message.answer(
+        f"🗑 Пользователь <code>{manager_id}</code> удалён из руководителей."
+    )
+
+
+@router.message(Command("list_manager"))
+async def cmd_list_manager(
+    message: Message, db: Database, is_admin: bool, edit: bool = False
+):
+    """Показывает список всех руководителей."""
+    if not is_admin:
+        if not edit:
+            await message.answer("🚫 У вас нет прав администратора.")
+        return
+
+    db_managers = await db.managers.get_all()
+    text = "<b>👔 Список руководителей:</b>\n\n"
+    if db_managers:
+        for row in db_managers:
+            text += f"  • <code>{row['user_id']}</code>\n"
+    else:
+        text += "  • (пусто)\n"
+
+    if edit:
+        await message.edit_text(text, reply_markup=back_to_admin_kb())
+    else:
+        await message.answer(text, reply_markup=back_to_admin_kb())
+
+
+# ===================== Управление инженерами =====================
+
+class AddEngineerForm(StatesGroup):
+    """Пошаговое добавление инженера: TG ID → Имя → Bitrix24 ID."""
+    tg_id = State()
+    name = State()
+    bitrix_id = State()
+
+@router.message(Command("add_eng"))
+async def cmd_add_engineer(message: Message, db: Database, is_admin: bool, state: FSMContext):
+    """Начинает пошаговый диалог добавления инженера."""
+    logger.info(f"Команда /add_eng вызвана пользователем: {message.from_user.id}")
+    is_admin = await db.is_admin(message.from_user.id)
+    if not is_admin:
+        await message.answer("🚫 У вас нет прав администратора.")
+        return
+    await state.set_state(AddEngineerForm.tg_id)
+    await message.answer("📲 <b>Шаг 1/3:</b> Пришлите Telegram ID инженера (число).")
+
+@router.message(StateFilter(AddEngineerForm.tg_id))
+async def add_eng_step_tg_id(message: Message, state: FSMContext, db: Database):
+    try:
+        eng_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте ещё раз.")
+        return
+    if eng_id in ADMIN_IDS:
+        await message.answer("❌ Этот пользователь уже администратор.")
+        return
+    await state.update_data(tg_id=eng_id)
+    await state.set_state(AddEngineerForm.name)
+    await message.answer("👤 <b>Шаг 2/3:</b> Пришлите имя инженера.")
+
+@router.message(StateFilter(AddEngineerForm.name))
+async def add_eng_step_name(message: Message, state: FSMContext, db: Database):
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Имя не может быть пустым. Попробуйте ещё раз.")
+        return
+    await state.update_data(name=name)
+    await state.set_state(AddEngineerForm.bitrix_id)
+    await message.answer("🔗 <b>Шаг 3/3:</b> Пришлите ID инженера в Битрикс24 (или <code>0</code>, чтобы пропустить).")
+
+@router.message(StateFilter(AddEngineerForm.bitrix_id))
+async def add_eng_step_bitrix(message: Message, state: FSMContext, db: Database):
+    try:
+        bitrix_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте ещё раз (или <code>0</code> для пропуска).")
+        return
+
+    data = await state.get_data()
+    eng_id = data['tg_id']
+    eng_name = data['name']
+
     await db.add_engineer(eng_id, eng_name)
-    await message.answer(f"✅ Инженер <b>{html.escape(eng_name)}</b> (ID: <code>{eng_id}</code>) добавлен.")
+    if bitrix_id != 0:
+        await db.set_bitrix_user_id(eng_id, bitrix_id)
+        await message.answer(
+            f"✅ Инженер <b>{html.escape(eng_name)}</b> добавлен.\n"
+            f"🆔 Telegram: <code>{eng_id}</code>\n"
+            f"🔗 Bitrix24: <code>{bitrix_id}</code>"
+        )
+    else:
+        await message.answer(
+            f"✅ Инженер <b>{html.escape(eng_name)}</b> добавлен.\n"
+            f"🆔 Telegram: <code>{eng_id}</code>"
+        )
+    await state.clear()
 
 @router.message(Command("del_eng"))
 async def cmd_del_engineer(message: Message, db: Database, is_admin: bool):
@@ -252,35 +376,6 @@ async def cmd_list_engineers(message: Message, db: Database, is_admin: bool, edi
         await message.edit_text(text, reply_markup=back_to_admin_kb())
     else:
         await message.answer(text, reply_markup=back_to_admin_kb())
-
-@router.message(Command("set_bitrix"))
-async def cmd_set_bitrix(message: Message, db: Database, is_admin: bool):
-    """Устанавливает соответствие инженера бота пользователю Битрикс24."""
-    # Явная проверка прав через БД — не полагаемся только на middleware
-    is_admin = await db.is_admin(message.from_user.id)
-    if not is_admin:
-        await message.answer("🚫 У вас нет прав администратора.")
-        return
-    args = message.text.split()
-    if len(args) < 3:
-        await message.answer("Используйте: <code>/set_bitrix ID_инженера ID_пользователя_Битрикс24</code>")
-        return
-
-    try:
-        eng_id = int(args[1])
-        bitrix_id = int(args[2])
-    except ValueError:
-        await message.answer("❌ ID инженера и ID пользователя Битрикс24 должны быть числами.")
-        return
-
-    # Проверяем, что инженер существует (включая неактивных)
-    engineers = await db.get_all_engineers()
-    if not any(e['user_id'] == eng_id for e in engineers):
-        await message.answer(f"❌ Инженер с ID <code>{eng_id}</code> не найден. Сначала добавьте его через /add_eng.")
-        return
-
-    await db.set_bitrix_user_id(eng_id, bitrix_id)
-    await message.answer(f"✅ Для инженера <code>{eng_id}</code> установлен ID пользователя Битрикс24: <code>{bitrix_id}</code>.")
 
 @router.message(Command("bulk_add_eng"))
 async def cmd_bulk_add_engineers(message: Message, db: Database, is_admin: bool):

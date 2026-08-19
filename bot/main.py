@@ -20,12 +20,14 @@ from aiogram.types import (
     BotCommandScopeDefault,
     ErrorEvent,
 )
+from aiohttp import web
 
 from bot.config import (
     ADMIN_IDS,
     BOT_TOKEN,
     DB_PATH,
     LOG_LEVEL,
+    MANAGER_DASHBOARD_PORT,
     REDIS_URL,
     TICKET_TIMEOUT,
     WEBHOOK_HOST,
@@ -35,9 +37,10 @@ from bot.config import (
     WEBHOOK_URL,
 )
 from bot.database import Database
-from bot.handlers import admin, client, engineer, relay
+from bot.handlers import admin, client, engineer, manager, relay
 from bot.logging_config import setup_logging
 from bot.middlewares import DbSessionMiddleware, RoleMiddleware, ThrottlingMiddleware
+from bot.web_dashboard import create_app as create_dashboard_app
 
 logger = logging.getLogger(__name__)
 # При DEBUG видим все входящие события aiogram в консоли
@@ -68,17 +71,14 @@ DEFAULT_COMMANDS = [
 # Команды, доступные только администраторам
 ADMIN_COMMANDS = [
     BotCommand(command="admin", description="🛠 Админ-панель"),
-    BotCommand(command="stats", description="📊 Статистика"),
-    BotCommand(command="dashboard", description="📊 Дашборд"),
-    BotCommand(command="export", description="📥 Экспорт CSV"),
     BotCommand(command="add_admin", description="➕ Добавить админа"),
     BotCommand(command="del_admin", description="➖ Удалить админа"),
-    BotCommand(command="list_admin", description="👑 Список админов"),
     BotCommand(command="add_eng", description="➕ Добавить инженера"),
     BotCommand(command="del_eng", description="➖ Удалить инженера"),
-    BotCommand(command="list_eng", description="👥 Список инженеров"),
     BotCommand(command="bulk_add_eng", description="📦 Массовое добавление инженеров"),
-    BotCommand(command="set_bitrix", description="🔗 Привязка к Битрикс24"),
+    BotCommand(command="manager", description="👔 Панель руководителя"),
+    BotCommand(command="add_manager", description="➕ Добавить руководителя"),
+    BotCommand(command="del_manager", description="➖ Удалить руководителя"),
 ]
 
 async def get_all_admin_ids(db: Database) -> set:
@@ -198,6 +198,17 @@ async def main():
     dp.include_router(engineer.router)
     dp.include_router(client.router)
     dp.include_router(relay.router)
+    dp.include_router(manager.router)
+
+    # Запускаем веб-дашборд руководителя в фоне
+    dashboard_app = create_dashboard_app(db)
+    dashboard_runner = web.AppRunner(dashboard_app)
+    await dashboard_runner.setup()
+    dashboard_site = web.TCPSite(dashboard_runner, "0.0.0.0", MANAGER_DASHBOARD_PORT)
+    await dashboard_site.start()
+    logger.info(
+        "Веб-дашборд руководителя запущен на http://0.0.0.0:%s", MANAGER_DASHBOARD_PORT
+    )
 
     # Запускаем фоновую задачу контроля таймаутов заявок
     timeout_task = asyncio.create_task(ticket_timeout_watcher(bot, db))
@@ -213,7 +224,6 @@ async def main():
                 SimpleRequestHandler,
                 setup_application,
             )
-            from aiohttp import web
             from aiohttp.web import middleware
 
             await bot.set_webhook(

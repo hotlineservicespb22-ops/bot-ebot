@@ -267,6 +267,28 @@ class Database:
             cursor = await self.conn.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
             return await cursor.fetchone() is not None
 
+    # Manager CRUD
+    async def add_manager(self, user_id: int):
+        async with self.lock:
+            await self.conn.execute("INSERT OR IGNORE INTO managers (user_id) VALUES (?)", (user_id,))
+            await self.conn.commit()
+
+    async def delete_manager(self, user_id: int):
+        async with self.lock:
+            await self.conn.execute("DELETE FROM managers WHERE user_id = ?", (user_id,))
+            await self.conn.commit()
+
+    async def get_managers(self) -> list[aiosqlite.Row]:
+        async with self.lock:
+            cursor = await self.conn.execute("SELECT * FROM managers")
+            return await cursor.fetchall()
+
+    async def is_manager(self, user_id: int) -> bool:
+        # Руководители проверяются только через БД (не через .env)
+        async with self.lock:
+            cursor = await self.conn.execute("SELECT 1 FROM managers WHERE user_id = ?", (user_id,))
+            return await cursor.fetchone() is not None
+
     # Ticket CRUD
     async def create_ticket(
         self,
@@ -461,6 +483,7 @@ class Database:
         """Сохраняет оценку клиента по завершённой заявке.
 
         Используется INSERT OR IGNORE, чтобы повторная оценка не перезаписывала предыдущую.
+        При оценке ≤ 3 заявка автоматически помечается как «проблемная» (low_rated_tickets).
         """
         async with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -468,6 +491,12 @@ class Database:
                 "INSERT OR IGNORE INTO ratings (ticket_id, client_id, rating, comment, created_at) VALUES (?, ?, ?, ?, ?)",
                 (ticket_id, client_id, rating, comment, now)
             )
+            # Триггер: оценка ≤ 3 → заявка попадает в дашборд руководителя
+            if rating <= 3:
+                await self.conn.execute(
+                    "INSERT OR IGNORE INTO low_rated_tickets (ticket_id, rating, flagged_at) VALUES (?, ?, ?)",
+                    (ticket_id, rating, now)
+                )
             await self.conn.commit()
 
     async def update_rating_comment(self, ticket_id: int, comment: str):
@@ -529,6 +558,64 @@ class Database:
                 (ticket_id,)
             )
             return await cursor.fetchall()
+
+    async def get_ticket_chat_text_only(self, ticket_id: int) -> list[aiosqlite.Row]:
+        """Возвращает переписку по заявке БЕЗ медиа-сообщений (только текст)."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "SELECT * FROM messages WHERE ticket_id = ? AND (media_type IS NULL OR media_type = '') "
+                "ORDER BY created_at ASC",
+                (ticket_id,)
+            )
+            return await cursor.fetchall()
+
+    # Low-Rated Tickets (дашборд руководителя)
+    async def get_low_rated_tickets(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[aiosqlite.Row]:
+        """Возвращает список проблемных заявок (оценка ≤ 3) с данными об инженере и клиенте."""
+        async with self.lock:
+            cursor = await self.conn.execute("""
+                SELECT
+                    t.id, t.uuid, t.client_name, t.company_city, t.machine_info,
+                    t.problem, t.status, t.created_at,
+                    r.rating, r.comment as rating_comment,
+                    e.name as engineer_name,
+                    (SELECT COUNT(*) FROM messages WHERE ticket_id = t.id) as message_count
+                FROM low_rated_tickets lrt
+                JOIN tickets t ON lrt.ticket_id = t.id
+                LEFT JOIN ratings r ON t.id = r.ticket_id
+                LEFT JOIN engineers e ON t.engineer_id = e.user_id
+                ORDER BY lrt.flagged_at DESC
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
+            return await cursor.fetchall()
+
+    async def get_low_rated_count(self) -> int:
+        """Возвращает общее количество проблемных заявок."""
+        async with self.lock:
+            cursor = await self.conn.execute("SELECT COUNT(*) as cnt FROM low_rated_tickets")
+            row = await cursor.fetchone()
+            return row['cnt'] if row else 0
+
+    async def get_low_rated_avg_rating(self) -> float | None:
+        """Средняя оценка среди проблемных заявок."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "SELECT AVG(rating) as avg_rating FROM low_rated_tickets"
+            )
+            row = await cursor.fetchone()
+            return row['avg_rating'] if row else None
+
+    async def get_low_rated_this_week_count(self) -> int:
+        """Количество проблемных заявок за последние 7 дней."""
+        async with self.lock:
+            cursor = await self.conn.execute("""
+                SELECT COUNT(*) as cnt FROM low_rated_tickets
+                WHERE flagged_at >= datetime('now', '-7 days')
+            """)
+            row = await cursor.fetchone()
+            return row['cnt'] if row else 0
 
     
     async def get_dashboard_data(self) -> dict:
@@ -690,7 +777,7 @@ class Database:
             'eng_colors': eng_colors,
             'ratings': ratings,
             'cities': cities,
-            'sla_funnel': [sla['f_open'], sla['f_prog'], sla['f_done'], sla['f_cancel']],
+            'status_flow': [sla['f_open'], sla['f_prog'], sla['f_done'], sla['f_cancel']],
             'sla_avg_h': sla['avg_h'] or 0,
             'reaction_min': reaction['avg_min'] or 0, 'reaction_cnt': reaction['cnt'] or 0,
             'equipment': equipment, 'problems': problems,
@@ -802,6 +889,25 @@ class Database:
         get_all = property(lambda self: self._db.get_admins)
         is_admin = property(lambda self: self._db.is_admin)
 
+    class _ManagerAccess:
+        """DAO-обёртка для методов работы с руководителями."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        add = property(lambda self: self._db.add_manager)
+        delete = property(lambda self: self._db.delete_manager)
+        get_all = property(lambda self: self._db.get_managers)
+        is_manager = property(lambda self: self._db.is_manager)
+
+    class _LowRatedAccess:
+        """DAO-обёртка для методов работы с проблемными заявками."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        get_list = property(lambda self: self._db.get_low_rated_tickets)
+        count = property(lambda self: self._db.get_low_rated_count)
+        avg_rating = property(lambda self: self._db.get_low_rated_avg_rating)
+        this_week = property(lambda self: self._db.get_low_rated_this_week_count)
+        chat_text_only = property(lambda self: self._db.get_ticket_chat_text_only)
+
     class _TicketAccess:
         """DAO-обёртка для методов работы с заявками."""
         def __init__(self, db: "Database"):
@@ -870,6 +976,14 @@ class Database:
     @property
     def admins(self) -> _AdminAccess:
         return self._AdminAccess(self)
+
+    @property
+    def managers(self) -> _ManagerAccess:
+        return self._ManagerAccess(self)
+
+    @property
+    def low_rated(self) -> _LowRatedAccess:
+        return self._LowRatedAccess(self)
 
     @property
     def tickets(self) -> _TicketAccess:

@@ -40,6 +40,8 @@ class RoleMiddleware(BaseMiddleware):
         # Инженер — это либо действующий инженер из таблицы engineers (is_active=1),
         # либо бывший инженер, у которого остались активные заявки в работе.
         data["is_engineer"] = is_in_engineers_table or has_active
+        # Руководитель — имеет доступ к дашборду проблемных заявок
+        data["is_manager"] = await db.is_manager(user.id)
         
         return await handler(event, data)
 

@@ -97,6 +97,16 @@ BITRIX_CHAT_ID = os.getenv("BITRIX_CHAT_ID", "")
 # и в текущей реализации не используется.
 BITRIX_FROM_USER_ID = os.getenv("BITRIX_FROM_USER_ID", "")
 
+# Ключ для доступа к веб-дашборду руководителя (передаётся в URL: ?key=...)
+MANAGER_DASHBOARD_KEY = os.getenv("MANAGER_DASHBOARD_KEY", "")
+# Порт веб-дашборда руководителя (по умолчанию 8081, чтобы не конфликтовать с webhook на 8080)
+try:
+    MANAGER_DASHBOARD_PORT = int(os.getenv("MANAGER_DASHBOARD_PORT", "8081"))
+except ValueError:
+    MANAGER_DASHBOARD_PORT = 8081
+# Публичный URL веб-дашборда (используется в ссылках из Telegram-уведомлений)
+MANAGER_DASHBOARD_URL = os.getenv("MANAGER_DASHBOARD_URL", f"http://localhost:{MANAGER_DASHBOARD_PORT}")
+
 # Секретный токен для проверки подлинности входящих webhook-запросов.
 # Задаётся через переменную окружения WEBHOOK_SECRET_TOKEN и сверяется
 # с заголовком X-Telegram-Bot-Api-Secret-Token. Если не задан — проверка отключена.

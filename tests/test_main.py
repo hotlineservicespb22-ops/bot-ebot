@@ -241,6 +241,7 @@ class TestMainWebhook:
 
             mock_bot.set_webhook.assert_awaited_once()
             mock_bot.delete_webhook.assert_awaited_once()
-            mock_site.start.assert_awaited_once()
+            # Теперь два TCPSite: дашборд на MANAGER_DASHBOARD_PORT + webhook на WEBHOOK_PORT
+            assert mock_site.start.await_count == 2
             mock_db.close.assert_awaited_once()
             mock_bot.session.close.assert_awaited_once()
