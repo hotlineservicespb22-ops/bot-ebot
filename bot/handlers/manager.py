@@ -12,6 +12,7 @@ import html
 import logging
 
 from aiogram import Bot, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
@@ -26,6 +27,16 @@ from bot.keyboards import (
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+async def _safe_edit(callback: CallbackQuery, text: str, **kwargs):
+    """Безопасное редактирование сообщения — игнорирует 'message is not modified'."""
+    try:
+        await callback.message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        raise
 
 
 @router.message(Command("manager"))
@@ -63,7 +74,7 @@ async def manager_callback_handler(
     action = callback_data.action
 
     if action == "menu":
-        await callback.message.edit_text(
+        await _safe_edit(callback, 
             "👔 <b>Панель руководителя</b>\n\nВыберите действие:",
             reply_markup=manager_menu_kb(),
         )
@@ -85,7 +96,7 @@ async def manager_callback_handler(
 async def _show_ticket_list(callback: CallbackQuery, db: Database, page: int):
     tickets = await db.low_rated.get_list(limit=100, offset=0)
     if not tickets:
-        await callback.message.edit_text(
+        await _safe_edit(callback, 
             "✅ <b>Проблемных заявок нет!</b>\n\n"
             "Все заявки имеют оценку выше 3 — отличная работа команды.",
             reply_markup=manager_menu_kb(),
@@ -102,7 +113,7 @@ async def _show_ticket_list(callback: CallbackQuery, db: Database, page: int):
         f"Средняя оценка: <b>{avg_rating:.1f if avg_rating else '—'}</b>\n\n"
         "<i>Выберите заявку для просмотра:</i>"
     )
-    await callback.message.edit_text(
+    await _safe_edit(callback, 
         header,
         reply_markup=manager_ticket_list_kb(tickets, page),
     )
@@ -160,7 +171,7 @@ async def _show_ticket_detail(
         f"📨 <b>Сообщений в переписке:</b> {msg_count}\n"
         f"\n🔗 <a href=\"{web_link}\">Открыть в веб-дашборде</a>"
     )
-    await callback.message.edit_text(
+    await _safe_edit(callback, 
         text,
         reply_markup=manager_ticket_detail_kb(ticket_id),
         disable_web_page_preview=False,
@@ -238,7 +249,7 @@ async def _show_ticket_chat(
         lines.append(line)
         chars += len(line)
 
-    await callback.message.edit_text(
+    await _safe_edit(callback, 
         "".join(lines),
         reply_markup=manager_ticket_detail_kb(ticket_id),
     )
