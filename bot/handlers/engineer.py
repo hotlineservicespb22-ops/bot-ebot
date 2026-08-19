@@ -362,37 +362,6 @@ async def cancel_ticket_by_engineer(callback: CallbackQuery, callback_data: Tick
             await callback.message.edit_text(callback.message.html_text + canceled_suffix)
     except Exception as e:
         logger.warning(f"Не удалось обновить сообщение об отмене заявки #{ticket_id}: {e}")
-
-
-async def _delete_ticket_notifications(bot: Bot, db: Database, ticket_id: int, except_engineer_id: int = None):
-    """
-    Удаляет уведомления о заявке у всех инженеров, кроме указанного.
-
-    Args:
-        bot: Экземпляр бота.
-        db: Экземпляр БД.
-        ticket_id: ID заявки.
-        except_engineer_id: ID инженера, у которого НЕ удалять уведомление (тот, кто взял заявку).
-    """
-    try:
-        notifications = await db.get_ticket_notifications(ticket_id)
-        for notif in notifications:
-            engineer_id = notif['engineer_id']
-            message_id = notif['message_id']
-            # Не удаляем уведомление у инженера, который взял заявку
-            if except_engineer_id is not None and engineer_id == except_engineer_id:
-                continue
-            try:
-                await bot.delete_message(chat_id=engineer_id, message_id=message_id)
-                logger.info(f"Удалено уведомление о заявке #{ticket_id} у инженера {engineer_id} (msg_id={message_id})")
-            except Exception as e:
-                logger.warning(f"Не удалось удалить уведомление о заявке #{ticket_id} у инженера {engineer_id}: {e}")
-        # Очищаем записи об уведомлениях (все, включая того, кто взял — его сообщение уже отредактировано)
-        await db.delete_ticket_notifications(ticket_id)
-    except Exception as e:
-        logger.error(f"Ошибка при удалении уведомлений о заявке #{ticket_id}: {e}")
-
-
 async def _create_bitrix_task_for_ticket(db: Database, ticket):
     """
     Создаёт задачу в Битрикс24 для заявки, назначенной на инженера.
@@ -439,7 +408,6 @@ async def _create_bitrix_task_for_ticket(db: Database, ticket):
             file_path = media['file_path']
             if not file_path:
                 continue
-            # file_path хранится как относительный путь (например, media/ticket_1/001_photo.jpg)
             file_id = await upload_file_to_bitrix(file_path)
             if file_id:
                 uf_files.append(file_id)
@@ -455,3 +423,31 @@ async def _create_bitrix_task_for_ticket(db: Database, ticket):
     else:
         logger.error(f"Не удалось создать задачу Битрикс24 для заявки #{ticket['id']}")
     return task_id
+
+async def _delete_ticket_notifications(bot: Bot, db: Database, ticket_id: int, except_engineer_id: int = None):
+    """
+    Удаляет уведомления о заявке у всех инженеров, кроме указанного.
+
+    Args:
+        bot: Экземпляр бота.
+        db: Экземпляр БД.
+        ticket_id: ID заявки.
+        except_engineer_id: ID инженера, у которого НЕ удалять уведомление (тот, кто взял заявку).
+    """
+    try:
+        notifications = await db.get_ticket_notifications(ticket_id)
+        for notif in notifications:
+            engineer_id = notif['engineer_id']
+            message_id = notif['message_id']
+            # Не удаляем уведомление у инженера, который взял заявку
+            if except_engineer_id is not None and engineer_id == except_engineer_id:
+                continue
+            try:
+                await bot.delete_message(chat_id=engineer_id, message_id=message_id)
+                logger.info(f"Удалено уведомление о заявке #{ticket_id} у инженера {engineer_id} (msg_id={message_id})")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить уведомление о заявке #{ticket_id} у инженера {engineer_id}: {e}")
+        # Очищаем записи об уведомлениях (все, включая того, кто взял — его сообщение уже отредактировано)
+        await db.delete_ticket_notifications(ticket_id)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении уведомлений о заявке #{ticket_id}: {e}")

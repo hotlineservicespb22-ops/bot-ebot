@@ -62,7 +62,7 @@ async def _suggest_next_tickets(
     empty_message: str,
 ) -> None:
     """Предлагает инженеру следующую активную заявку (или уведомляет об отсутствии)."""
-    remaining = await db.get_active_tickets_for_engineer(engineer_id)
+    remaining = await db.tickets.get_for_engineer(engineer_id)
     try:
         if remaining:
             await who.answer(
@@ -90,11 +90,11 @@ async def complete_ticket(
 
     Возвращает True, если заявка успешно завершена.
     """
-    ticket = await db.get_ticket(ticket_id)
+    ticket = await db.tickets.get(ticket_id)
     if not ticket or ticket['engineer_id'] != engineer_id or ticket['status'] != 'in_progress':
         return False
 
-    await db.close_ticket(ticket_id, status='completed', comment=comment)
+    await db.tickets.close(ticket_id, status='completed', comment=comment)
     await _notify_client(bot, ticket, 'completed')
     await _clear_active_state(state, ticket_id)
     await _suggest_next_tickets(
@@ -118,11 +118,11 @@ async def cancel_ticket(
 
     Возвращает True, если заявка успешно отменена.
     """
-    ticket = await db.get_ticket(ticket_id)
+    ticket = await db.tickets.get(ticket_id)
     if not ticket or ticket['engineer_id'] != engineer_id or ticket['status'] != 'in_progress':
         return False
 
-    await db.close_ticket(ticket_id, status='canceled', comment=comment)
+    await db.tickets.close(ticket_id, status='canceled', comment=comment)
     await _notify_client(bot, ticket, 'canceled')
     await _clear_active_state(state, ticket_id)
     await _suggest_next_tickets(

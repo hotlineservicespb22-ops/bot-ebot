@@ -1,3 +1,15 @@
+async def _migration_v7_cascade_delete(conn) -> None:
+    """
+    v7: Включаем поддержку внешних ключей и добавляем
+    ON DELETE CASCADE для связанных таблиц (при пересоздании).
+
+    SQLite не поддерживает ALTER CONSTRAINT, поэтому для существующих БД
+    внешние ключи с CASCADE будут работать только при новом создании таблиц.
+    Эта миграция гарантирует, что PRAGMA foreign_keys=ON применён.
+    """
+    await conn.execute("PRAGMA foreign_keys=ON")
+
+
 """
 Версионированная система миграций базы данных SQLite.
 
@@ -77,12 +89,26 @@ async def _migration_v5_ticket_engineer_index(conn) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_tickets_engineer_id ON tickets(engineer_id)")
 
 
+async def _migration_v6_ticket_uuid(conn) -> None:
+    """
+    v6: Добавление UUID для заявок.
+
+    Добавляет колонку uuid с уникальным индексом в таблицу tickets.
+    UUID используется в публичных API вместо автоинкрементного ID,
+    чтобы предотвратить перебор заявок.
+    """
+    await _ensure_column(conn, "tickets", "uuid", "TEXT")
+    await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_uuid ON tickets(uuid)")
+
+
 # Реестр миграций: version -> (название, функция)
 MIGRATIONS = {
     2: ("ticket_extra_fields", _migration_v2_ticket_fields),
     3: ("engineer_bitrix_user_id", _migration_v3_engineer_bitrix),
     4: ("ticket_escalations", _migration_v4_ticket_escalations),
     5: ("ticket_engineer_index", _migration_v5_ticket_engineer_index),
+    6: ("ticket_uuid", _migration_v6_ticket_uuid),
+    7: ("cascade_delete", _migration_v7_cascade_delete),
 }
 
 

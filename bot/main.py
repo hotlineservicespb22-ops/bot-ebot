@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import html
 import logging
@@ -30,6 +31,7 @@ from bot.config import (
     WEBHOOK_HOST,
     WEBHOOK_PATH,
     WEBHOOK_PORT,
+    WEBHOOK_SECRET_TOKEN,
     WEBHOOK_URL,
 )
 from bot.database import Database
@@ -67,6 +69,7 @@ DEFAULT_COMMANDS = [
 ADMIN_COMMANDS = [
     BotCommand(command="admin", description="🛠 Админ-панель"),
     BotCommand(command="stats", description="📊 Статистика"),
+    BotCommand(command="dashboard", description="📊 Дашборд"),
     BotCommand(command="export", description="📥 Экспорт CSV"),
     BotCommand(command="add_admin", description="➕ Добавить админа"),
     BotCommand(command="del_admin", description="➖ Удалить админа"),
@@ -205,19 +208,41 @@ async def main():
 
     try:
         if WEBHOOK_URL:
-            # Webhook-режим
+            # Webhook-режим с аутентификацией
             from aiogram.webhook.aiohttp_server import (
                 SimpleRequestHandler,
                 setup_application,
             )
             from aiohttp import web
+            from aiohttp.web import middleware
 
-            await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+            await bot.set_webhook(
+                f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+                secret_token=WEBHOOK_SECRET_TOKEN if WEBHOOK_SECRET_TOKEN else None,
+            )
             app = web.Application()
+
+            # Middleware для проверки секретного токена (если задан).
+            # Telegram передаёт токен в заголовке X-Telegram-Bot-Api-Secret-Token.
+            # Без этого любой, кто знает URL, может слать фейковые обновления боту.
+            if WEBHOOK_SECRET_TOKEN:
+                @middleware
+                async def secret_token_middleware(request, handler):
+                    header_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+                    if header_token != WEBHOOK_SECRET_TOKEN:
+                        logger.warning(
+                            "Webhook: неверный или отсутствующий secret token "
+                            "(запрос с %s)", request.remote
+                        )
+                        return web.Response(status=403, text="Forbidden")
+                    return await handler(request)
+                app.middlewares.append(secret_token_middleware)
+
             webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
             webhook_requests_handler.register(app, path=WEBHOOK_PATH)
             setup_application(app, dp, bot=bot)
-            logger.info(f"Бот запущен через webhook: {WEBHOOK_URL}{WEBHOOK_PATH}")
+            logger.info(f"Бот запущен через webhook: {WEBHOOK_URL}{WEBHOOK_PATH}"
+                        f" (auth: {'включена' if WEBHOOK_SECRET_TOKEN else 'отключена'})")
             runner = web.AppRunner(app)
             await runner.setup()
             site = web.TCPSite(runner, host=WEBHOOK_HOST, port=WEBHOOK_PORT)
@@ -287,6 +312,12 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
         await asyncio.sleep(check_interval)
 
 
+def _write_heartbeat(filepath: str, data: str) -> None:
+    """Write heartbeat timestamp to file (runs in thread to avoid I/O blocking)."""
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(data)
+
+
 async def heartbeat_writer():
     """
     Периодически пишет текущее время (UTC) в файл .heartbeat.
@@ -303,8 +334,8 @@ async def heartbeat_writer():
         interval = 5
     while True:
         try:
-            with open(heartbeat_file, "w", encoding="utf-8") as f:
-                f.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
+            content = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            await asyncio.to_thread(_write_heartbeat, heartbeat_file, content)
         except OSError as e:
             logger.warning(f"Heartbeat: не удалось записать {heartbeat_file}: {e}")
         await asyncio.sleep(interval)
@@ -329,10 +360,8 @@ if __name__ == '__main__':
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             for sig in (signal.SIGINT, signal.SIGTERM):
-                try:
+                with contextlib.suppress(NotImplementedError):
                     loop.add_signal_handler(sig, _handle_signal)
-                except NotImplementedError:
-                    pass
             try:
                 loop.run_until_complete(main())
             finally:

@@ -1,6 +1,7 @@
 [tool.ruff.lint]
-# Исключаем несущественные стилистические правила,
-# чтобы CI не падал на них, сохраняя фокус на критичных проблемах.
+# Правила, на которых фокусируемся: F (критичные), SIM (упрощение), C4 (comprehensions), B (bugbear)
+select = ["F", "SIM", "C4", "B"]
+# Исключаем правила, противоречащие стилю проекта
 extend-ignore = [
     "E501",     # line-too-long: длинные строки (часто в сообщениях/форматировании)
     "BLE001",   # blind-except: ловля широких исключений (принято для устойчивости)
@@ -14,7 +15,10 @@ extend-ignore = [
     "LOG014",   # exc-info-outside-except-handler
     "S110",     # try-except-pass
     "TRY002",   # raise-vanilla-class
+    "B028",     # no-explicit-stacklevel: не требуется
+    "B904",     # raise-without-from-inside-except: обработка ошибок без raise from
+    "SIM108",   # use-ternary-operator: тернарники не всегда читаемее
+    "SIM102",   # collapsible-if: не всегда улучшает читаемость
+    "SIM103",   # needless-bool: не всегда улучшает читаемость
+    "SIM401",   # dict-get-with-default: sqlite3.Row не поддерживает .get()
 ]
-
-# Фокус на критичных проблемах: неиспользуемые импорты, переменные, неопределённые имена (F)
-select = ["F"]

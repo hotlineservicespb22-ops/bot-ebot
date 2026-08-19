@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import csv
 import datetime
 import html
 import io
+import json
 import logging
 
 from aiogram import Bot, Router
@@ -21,6 +23,23 @@ from bot.keyboards import (
 router = Router()
 logger = logging.getLogger(__name__)
 
+
+async def _send_dashboard(target_msg, db: Database, bot: Bot, status_msg=None):
+    """Формирует и отправляет HTML-дашборд."""
+    import json
+    data = await db.get_dashboard_data()
+    from bot.dashboard import generate_dashboard
+    html = generate_dashboard(json.dumps(data, ensure_ascii=False))
+    from aiogram.types import BufferedInputFile
+    doc = BufferedInputFile(html.encode('utf-8'), filename='dashboard.html')
+    await bot.send_document(
+        chat_id=target_msg.chat.id,
+        document=doc,
+        caption="📊 <b>Дашборд Hotline Service</b>\n\nОткройте файл в браузере для просмотра графиков."
+    )
+    if status_msg:
+        with contextlib.suppress(Exception):
+            await status_msg.delete()
 
 async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs):
     """
@@ -80,6 +99,10 @@ async def admin_panel_callback(callback: CallbackQuery, callback_data: AdminCall
         await db.set_engineer_active(callback_data.engineer_id, 0)
         await _safe_callback_answer(callback, "⚪ Инженер исключён из дежурных.")
         await show_duty_management(callback.message, db, edit=True)
+    elif action == "dashboard":
+        await _safe_callback_answer(callback, "📈 Формирую дашборд...")
+        status_msg = await callback.message.answer("⏳ Загрузка данных...")
+        await _send_dashboard(callback.message, db, bot, status_msg)
 
 @router.message(Command("add_admin"))
 async def cmd_add_admin(message: Message, db: Database):
@@ -219,7 +242,7 @@ async def cmd_list_engineers(message: Message, db: Database, is_admin: bool, edi
         if not edit:
             await message.answer("🚫 У вас нет прав администратора.")
         return
-    rows = await db.get_engineers()
+    rows = await db.get_all_engineers()
     if not rows:
         text = "Список инженеров пуст."
     else:
@@ -445,6 +468,28 @@ async def cmd_export_tickets(message: Message, db: Database, bot: Bot, is_admin:
         await status_msg.delete()
     else:
         await message.edit_text("📥 <b>Экспорт CSV</b>\n\n✅ Отчет сформирован и отправлен.", reply_markup=back_to_admin_kb())
+
+
+@router.message(Command("dashboard"))
+async def cmd_dashboard(message: Message, db: Database, is_admin: bool):
+    """Отправляет HTML-дашборд как WebApp или файл."""
+    if not is_admin:
+        await message.answer("🚫 У вас нет прав администратора.")
+        return
+    
+    data = await db.get_dashboard_data()
+    from bot.dashboard import generate_dashboard
+    html = generate_dashboard(json.dumps(data, ensure_ascii=False))
+    
+    # Отправляем как HTML-файл (Telegram WebApp можно открыть позже)
+    from aiogram.types import BufferedInputFile
+    doc = BufferedInputFile(html.encode('utf-8'), filename='dashboard.html')
+    await message.answer_document(
+        doc,
+        caption="📊 <b>Дашборд Hotline Service</b>\n\n"
+                "Откройте файл в браузере для просмотра графиков."
+    )
+
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, db: Database, is_admin: bool, edit: bool = False):

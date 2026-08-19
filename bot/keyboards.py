@@ -78,7 +78,7 @@ def engineer_active_ticket_kb():
     """Reply-клавиатура для инженера, когда есть активно выбранная заявка."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📋 Мои заявки в работе")], # Всегда должна быть
+            [KeyboardButton(text="📋 Мои заявки в работе")],
             [
                 KeyboardButton(text="✅ Завершить текущую"),
                 KeyboardButton(text="🚫 Отменить текущую")
@@ -88,13 +88,17 @@ def engineer_active_ticket_kb():
     )
 
 def ticket_action_kb(ticket_id: int):
-    """Inline-клавиатура для инженера под новой заявкой (кнопка 'Взять в работу')."""
+    """Inline-клавиатура для инженера под новой заявкой (кнопки 'Взять в работу' и 'Посмотреть')."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[
             InlineKeyboardButton(
                 text="✅ Взять в работу", 
                 callback_data=TicketCallback(action="take", ticket_id=ticket_id).pack()
-            )
+            ),
+            InlineKeyboardButton(
+                text="👁 Посмотреть",
+                callback_data=TicketCallback(action="view", ticket_id=ticket_id).pack()
+            ),
         ]]
     )
 
@@ -318,6 +322,7 @@ def admin_menu_kb():
     """Inline-клавиатура админ-панели."""
     buttons = [
         [InlineKeyboardButton(text="📊 Статистика", callback_data=AdminCallback(action="stats").pack())],
+        [InlineKeyboardButton(text="📈 Дашборд", callback_data=AdminCallback(action="dashboard").pack())],
         [InlineKeyboardButton(text="📥 Экспорт CSV", callback_data=AdminCallback(action="export").pack())],
         [InlineKeyboardButton(text="👥 Список инженеров", callback_data=AdminCallback(action="list_eng").pack())],
         [InlineKeyboardButton(text="🔄 Управление дежурными", callback_data=AdminCallback(action="duty_manage").pack())],

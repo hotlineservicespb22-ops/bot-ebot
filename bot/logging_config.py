@@ -4,9 +4,15 @@
 Логирование настраивается один раз в точке входа (bot/main.py) через setup_logging().
 Уровень и файл лога берутся из переменных окружения LOG_LEVEL и LOG_FILE
 (см. bot/config.py). Функция идемпотентна — повторные вызовы не дублируют обработчики.
+
+Безопасность: SanitizingFilter автоматически маскирует чувствительные данные
+(BOT_TOKEN, BITRIX_WEBHOOK_URL, REDIS_URL, REDIS_PASSWORD) во всех лог-записях,
+предотвращая утечку секретов через файлы логов или вывод в консоль.
 """
 import logging
 import logging.handlers
+import os
+import re
 
 from bot.config import LOG_FILE, LOG_LEVEL
 
@@ -15,6 +21,53 @@ _logging_configured = False
 
 # Допустимые уровни логирования
 _VALID_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+# Чувствительные переменные окружения, которые нужно маскировать в логах
+_SENSITIVE_ENV_VARS = [
+    "BOT_TOKEN",
+    "BITRIX_WEBHOOK_URL",
+    "REDIS_URL",
+    "REDIS_PASSWORD",
+]
+
+
+class SanitizingFilter(logging.Filter):
+    """
+    Фильтр логирования, маскирующий чувствительные данные.
+
+    Заменяет значения чувствительных переменных окружения (токены, пароли, URL вебхуков)
+    на строку вида ``***<первые 4 символа>***`` во всех лог-записях, чтобы предотвратить
+    случайную утечку секретов через файлы логов или вывод в консоль.
+    """
+
+    _patterns: list | None = None
+    _initialized: bool = False
+
+    @classmethod
+    def _ensure_patterns(cls) -> None:
+        """Ленивая инициализация паттернов замены (один раз)."""
+        if cls._initialized:
+            return
+        cls._initialized = True
+        cls._patterns = []
+        for var_name in _SENSITIVE_ENV_VARS:
+            value = os.getenv(var_name, "")
+            if not value:
+                continue
+            safe = f"***{value[:4]}***" if len(value) > 4 else "***"
+            escaped = re.escape(value)
+            cls._patterns.append((re.compile(escaped), safe))
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        self._ensure_patterns()
+        if not self._patterns:
+            return True
+        msg = record.getMessage()
+        for pattern, replacement in self._patterns:
+            msg = pattern.sub(replacement, msg)
+        record.msg = msg
+        record.args = None
+        return True
 
 
 def setup_logging() -> None:
@@ -33,6 +86,10 @@ def setup_logging() -> None:
 
     root = logging.getLogger()
     root.setLevel(level)
+
+    # Фильтр санитизации чувствительных данных (один раз на корневой логгер)
+    if not any(isinstance(f, SanitizingFilter) for f in root.filters):
+        root.addFilter(SanitizingFilter())
 
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 

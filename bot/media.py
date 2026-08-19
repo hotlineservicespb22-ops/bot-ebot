@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import logging
 import mimetypes
 import os
 import re
+import unicodedata
 
 from aiogram import Bot
 
@@ -54,7 +56,10 @@ def ensure_ticket_dir(ticket_id: int) -> str:
 
 
 def sanitize_filename(name: str) -> str:
-    """Очищает имя файла от недопустимых символов и ограничивает длину."""
+    """Очищает имя файла от недопустимых символов, нормализует Unicode и ограничивает длину."""
+    # NFKC-нормализация для защиты от path traversal через Unicode-эквиваленты
+    name = unicodedata.normalize('NFKC', name)
+
     name = re.sub(r'[\\/*?:"<>|]', '_', name)
     name = name.strip() or 'file'
     # Обрезаем длину, сохраняя расширение (если есть)
@@ -101,10 +106,8 @@ def next_file_number(ticket_id: int) -> int:
         # Ищем файлы вида 001_*.*
         match = re.match(r'^(\d+)_', name)
         if match:
-            try:
+            with contextlib.suppress(ValueError):
                 max_num = max(max_num, int(match.group(1)))
-            except ValueError:
-                pass
     return max_num + 1
 
 

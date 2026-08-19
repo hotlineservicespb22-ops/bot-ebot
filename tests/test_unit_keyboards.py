@@ -148,9 +148,10 @@ class TestInlineKeyboards:
         kb = ticket_action_kb(42)
         assert isinstance(kb, InlineKeyboardMarkup)
         assert len(kb.inline_keyboard) == 1
-        button = kb.inline_keyboard[0][0]
-        assert button.text == "✅ Взять в работу"
-        assert "ticket:take:42" in button.callback_data
+        assert len(kb.inline_keyboard[0]) == 2
+        assert kb.inline_keyboard[0][0].text == "✅ Взять в работу"
+        assert kb.inline_keyboard[0][1].text == "👁 Посмотреть"
+        assert "ticket:take:42" in kb.inline_keyboard[0][0].callback_data
 
     def test_engineer_ticket_control_kb(self):
         """Проверяет клавиатуру управления заявкой инженера."""
@@ -324,9 +325,10 @@ class TestAdminKeyboards:
         """Проверяет структуру админ-меню."""
         kb = admin_menu_kb()
         assert isinstance(kb, InlineKeyboardMarkup)
-        assert len(kb.inline_keyboard) == 5
+        assert len(kb.inline_keyboard) == 6
         all_texts = [btn.text for row in kb.inline_keyboard for btn in row]
         assert "📊 Статистика" in all_texts
+        assert "📈 Дашборд" in all_texts
         assert "📥 Экспорт CSV" in all_texts
         assert "👥 Список инженеров" in all_texts
         assert "🔄 Управление дежурными" in all_texts

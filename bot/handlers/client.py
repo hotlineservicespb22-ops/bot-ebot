@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import html
 import logging
@@ -31,6 +32,13 @@ from bot.keyboards import (
 from bot.media import save_media_file
 
 router = Router()
+
+# ─── Прогресс-бар для FSM-воронки ───────────────────────────────────────
+def _progress_bar(step: int, total: int = 4) -> str:
+    """Возвращает текстовый прогресс-бар: [■■■□] 3/4."""
+    filled = "■" * step
+    empty = "□" * (total - step)
+    return f"[{filled}{empty}] {step}/{total}"
 
 # Модульный словарь для антиспама: user_id -> время последнего старта воронки.
 # Защищает от массового создания заявок одним клиентом.
@@ -357,10 +365,8 @@ async def faq_callback_handler(callback: CallbackQuery, callback_data: FaqCallba
         # Показываем список вопросов выбранного раздела
         section = next((s for s in FAQ_SECTIONS if s["id"] == callback_data.section_id), None)
         if not section:
-            try:
+            with contextlib.suppress(Exception):
                 await callback.answer("Раздел не найден.", show_alert=True)
-            except Exception:
-                pass
             return
         text = f"{section['title']}\n\nВыберите вопрос:"
         try:
@@ -373,10 +379,8 @@ async def faq_callback_handler(callback: CallbackQuery, callback_data: FaqCallba
         # Показываем развёрнутый ответ на выбранный вопрос
         answer = FAQ_ANSWERS.get(callback_data.question_id)
         if not answer:
-            try:
+            with contextlib.suppress(Exception):
                 await callback.answer("Вопрос не найден.", show_alert=True)
-            except Exception:
-                pass
             return
         text = answer
         try:
@@ -419,8 +423,8 @@ async def start_ticket(message: Message, state: FSMContext, bot: Bot, db: Databa
     await state.clear()
     await state.set_state(TicketForm.problem_media)
     msg = await message.answer(
-        "Начинаем оформление заявки.\n\n"
-        "📝 <b>Шаг 1/4.</b> Опишите проблему и прикрепите фото/видео поломки одним сообщением.\n\n"
+        f"Начинаем оформление заявки.\n\n"
+        f"{_progress_bar(1, 4)} 📝 Опишите проблему и прикрепите фото/видео поломки одним сообщением.\n\n"
         "Например: «Станок не включается, ошибка AL-01» + фото панели.\n\n"
         "Чтобы прервать, нажмите '❌ Отмена' внизу.",
         reply_markup=cancel_kb()
@@ -468,7 +472,7 @@ async def ticket_problem_media(message: Message, state: FSMContext, bot: Bot):
     await state.update_data(problem=problem_text, media_id=media_id, media_type=media_type, last_client_msg_id=message.message_id)
     await state.set_state(TicketForm.machine_info)
     msg = await message.answer(
-        "📷 <b>Шаг 2/4.</b> Пришлите фото шильдика станка (табличка с моделью) "
+        f"{_progress_bar(2, 4)} 📷 Пришлите фото шильдика станка (табличка с моделью) "
         "или напишите бренд и модель вручную.\n\n"
         "Например: «Wattsan 1610, Fanuc 0i-MF»"
     )
@@ -517,7 +521,7 @@ async def ticket_machine_info(message: Message, state: FSMContext, bot: Bot):
     )
     await state.set_state(TicketForm.company_city)
     msg = await message.answer(
-        "🏢 <b>Шаг 3/4.</b> Укажите город и ИНН или название компании.\n\n"
+        f"{_progress_bar(3, 4)} 🏢 Укажите город и ИНН или название компании.\n\n"
         "Например: «Москва, ИНН 7712345678» или «ООО Ромашка, Казань»"
     )
     await state.update_data(last_bot_msg_id=msg.message_id)
@@ -540,7 +544,7 @@ async def ticket_company_city(message: Message, state: FSMContext, bot: Bot):
     await state.update_data(company_city=company_city_text, last_client_msg_id=message.message_id)
     await state.set_state(TicketForm.contact)
     msg = await message.answer(
-        "📞 <b>Шаг 4/4.</b> Поделитесь контактом для связи:",
+        f"{_progress_bar(4, 4)} 📞 Поделитесь контактом для связи:",
         reply_markup=contact_kb()
     )
     await state.update_data(last_bot_msg_id=msg.message_id)

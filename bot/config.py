@@ -96,3 +96,8 @@ BITRIX_CHAT_ID = os.getenv("BITRIX_CHAT_ID", "")
 # сообщения всегда уходят от владельца вебхука. Переменная оставлена для совместимости
 # и в текущей реализации не используется.
 BITRIX_FROM_USER_ID = os.getenv("BITRIX_FROM_USER_ID", "")
+
+# Секретный токен для проверки подлинности входящих webhook-запросов.
+# Задаётся через переменную окружения WEBHOOK_SECRET_TOKEN и сверяется
+# с заголовком X-Telegram-Bot-Api-Secret-Token. Если не задан — проверка отключена.
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "")

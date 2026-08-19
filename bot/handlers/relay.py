@@ -23,6 +23,7 @@ from bot.keyboards import (
     engineer_list_kb,
     engineer_redirect_kb,
     engineer_select_client_kb,
+    ticket_action_kb,
 )
 from bot.media import save_media_file
 
@@ -72,7 +73,7 @@ def format_ticket_detail(ticket) -> str:
     }
     status = status_map.get(ticket['status'], ticket['status'])
     text = (
-        f"🎫 <b>Заявка #{ticket['id']}</b>\n"
+        f"{_status_badge(ticket)} <b>Заявка #{ticket['id']}</b>\n"
         f"Статус: <b>{status}</b>\n\n"
         f"🏢 <b>Компания/Город:</b> {html.escape(str(ticket['company_city'] or '—'))}\n"
         f"🔧 <b>Станок:</b> {html.escape(str(ticket['machine_info'] or '—'))}\n"
@@ -82,6 +83,26 @@ def format_ticket_detail(ticket) -> str:
     )
     return text
 
+def _status_badge(ticket) -> str:
+    """Цветовой тег: 🔴 просрочка, 🟡 ждёт, 🟢 в работе, ⚪ остальное."""
+    status = ticket['status'] if 'status' in ticket else ''
+    created = ticket['created_at'] if 'created_at' in ticket else ''
+    if status == 'open' and created:
+        try:
+            from bot.config import TICKET_TIMEOUT
+            dt = datetime.datetime.fromisoformat(created)
+            elapsed = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds()
+            if elapsed > TICKET_TIMEOUT:
+                return '🔴'
+        except Exception:
+            pass
+        return '🟡'
+    if status == 'in_progress':
+        return '🟢'
+    if status in ('completed', 'canceled'):
+        return '⚪'
+    return '⚪'
+
 def build_list_text(tickets, mode: str) -> str:
     """Строит текстовое описание списка заявок."""
     header = "<b>📋 Ваши активные заявки:</b>" if mode == 'mine' else "<b>📥 Нераспределенные заявки:</b>"
@@ -89,7 +110,8 @@ def build_list_text(tickets, mode: str) -> str:
     for t in tickets:
         company = str(t['company_city'] or '—')
         problem = str(t['problem'] or '—')
-        lines.append(f"<b>Заявка #{t['id']}</b> — {html.escape(company)}: {html.escape(problem)}")
+        badge = _status_badge(t)
+        lines.append(f"{badge} <b>Заявка #{t['id']}</b> — {html.escape(company)}: {html.escape(problem)}")
     lines.append("")
     lines.append("Выберите заявку для просмотра:")
     return "\n".join(lines)
@@ -139,6 +161,29 @@ async def _require_engineer(callback: CallbackQuery, is_engineer: bool) -> bool:
         await callback.answer("У вас нет прав инженера.", show_alert=True)
         return False
     return True
+
+@router.callback_query(TicketCallback.filter(F.action == "select"))
+
+@router.callback_query(TicketCallback.filter(F.action == "view"))
+async def view_ticket_info(callback: CallbackQuery, callback_data: TicketCallback, db: Database):
+    """Показывает детальную информацию о заявке без взятия в работу."""
+    await callback.answer()
+    ticket = await db.get_ticket(callback_data.ticket_id)
+    if not ticket:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+    detail = format_ticket_detail(ticket)
+    
+    # Показываем правильные кнопки в зависимости от статуса
+    if ticket['status'] == 'open':
+        kb = ticket_action_kb(callback_data.ticket_id)
+    elif ticket['engineer_id'] == callback.from_user.id:
+        kb = engineer_redirect_kb(callback_data.ticket_id)
+    else:
+        kb = None
+    
+    await callback.message.answer(detail, reply_markup=kb)
+
 
 @router.callback_query(TicketCallback.filter(F.action == "select"))
 async def select_ticket_for_reply(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):

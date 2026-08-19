@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import datetime
+import uuid as _uuid
 
 import aiosqlite
 
@@ -18,10 +20,8 @@ class Database:
         # PRAGMA-оптимизации: внешние ключи, WAL для конкурентности, таймаут блокировки
         await self.conn.execute("PRAGMA foreign_keys=ON")
         await self.conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            await self.conn.execute("PRAGMA journal_mode=WAL")
-        except Exception:
-            pass  # Для in-memory БД WAL недоступен — игнорируем
+        with contextlib.suppress(Exception):
+            await self.conn.execute("PRAGMA journal_mode=WAL")  # Для in-memory БД WAL недоступен — игнорируем
         await self.conn.commit()
 
     async def close(self):
@@ -49,6 +49,7 @@ class Database:
             await self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS tickets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT UNIQUE,
                     client_id INTEGER,
                     client_name TEXT,
                     company TEXT,
@@ -76,7 +77,7 @@ class Database:
                     text TEXT,
                     media_type TEXT,
                     created_at TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
                 )
             """)
             # Ratings table (оценки клиентов)
@@ -88,7 +89,7 @@ class Database:
                     rating INTEGER,
                     comment TEXT,
                     created_at TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
                 )
             """)
             # Media table (сохранённые фото/видео/документы заявки)
@@ -102,7 +103,7 @@ class Database:
                     sender_id INTEGER,
                     sender_role TEXT,
                     created_at TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
                 )
             """)
             # Ticket notifications table (message_id уведомлений, отправленных инженерам)
@@ -113,7 +114,7 @@ class Database:
                     engineer_id INTEGER,
                     message_id INTEGER,
                     created_at TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
                 )
             """)
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_notifications_ticket ON ticket_notifications(ticket_id)")
@@ -125,7 +126,7 @@ class Database:
                     ticket_id INTEGER,
                     receiver_id INTEGER,
                     created_at TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
                 )
             """)
             await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_relay_message_map_ticket ON relay_message_map(ticket_id)")
@@ -286,13 +287,14 @@ class Database:
     ) -> int:
         async with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            ticket_uuid = str(_uuid.uuid4())
             cursor = await self.conn.execute(
                 """INSERT INTO tickets (
-                    client_id, client_name, company, equipment_type, brand,
+                    uuid, client_id, client_name, company, equipment_type, brand,
                     cnc_model, machine_info, company_city, problem, media_id, city, inn_contract, contact, machine_media_id, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    client_id, client_name, company, equipment_type, brand,
+                    ticket_uuid, client_id, client_name, company, equipment_type, brand,
                     cnc_model, machine_info, company_city, problem, media_id, city, inn_contract, contact, machine_media_id, now
                 )
             )
@@ -303,6 +305,14 @@ class Database:
     async def get_ticket(self, ticket_id: int) -> aiosqlite.Row | None:
         async with self.lock:
             cursor = await self.conn.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,))
+            return await cursor.fetchone()
+
+    async def get_ticket_by_uuid(self, ticket_uuid: str) -> aiosqlite.Row | None:
+        """Возвращает заявку по UUID (для безопасного доступа извне)."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "SELECT * FROM tickets WHERE uuid = ?", (ticket_uuid,)
+            )
             return await cursor.fetchone()
 
     async def take_ticket(self, ticket_id: int, engineer_id: int) -> bool:
@@ -520,6 +530,177 @@ class Database:
             )
             return await cursor.fetchall()
 
+    
+    async def get_dashboard_data(self) -> dict:
+        """Агрегирует данные для дашборда: KPI, графики, рейтинги."""
+        async with self.lock:
+            # Всего/открыто/в работе/закрыто
+            cursor = await self.conn.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_count,
+                    SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) as in_progress,
+                    SUM(CASE WHEN status IN ('completed','canceled') THEN 1 ELSE 0 END) as closed
+                FROM tickets
+            """)
+            row = await cursor.fetchone()
+            
+            # Заявки по дням (последние 14 дней)
+            cursor = await self.conn.execute("""
+                SELECT DATE(created_at) as day, COUNT(*) as cnt
+                FROM tickets WHERE created_at IS NOT NULL
+                GROUP BY day ORDER BY day DESC LIMIT 14
+            """)
+            daily = await cursor.fetchall()
+            daily_labels = [r['day'] for r in reversed(daily)]
+            daily_counts = [r['cnt'] for r in reversed(daily)]
+            
+            # Инженеры: нагрузка + среднее время
+            cursor = await self.conn.execute("""
+                SELECT e.name, e.user_id,
+                    SUM(CASE WHEN t.status='in_progress' THEN 1 ELSE 0 END) as active,
+                    COUNT(t.id) as total_tickets,
+                    AVG(CASE WHEN t.closed_at IS NOT NULL AND t.created_at IS NOT NULL
+                        THEN (julianday(t.closed_at) - julianday(t.created_at)) * 24 END) as avg_hours
+                FROM engineers e
+                LEFT JOIN tickets t ON e.user_id = t.engineer_id
+                GROUP BY e.user_id, e.name
+                ORDER BY active DESC
+            """)
+            engs = await cursor.fetchall()
+            
+            eng_names = [r['name'] or f"ID:{r['user_id']}" for r in engs]
+            eng_loads = [r['active'] or 0 for r in engs]
+            eng_avg_times = [round(r['avg_hours'] or 0, 1) for r in engs]
+            eng_colors = ['#e94560','#0f9b58','#f0a500','#4361ee','#7209b7','#f72585','#4cc9f0'][:len(engs)]
+            
+            # Рейтинги
+            cursor = await self.conn.execute("""
+                SELECT e.name, AVG(r.rating) as avg_r, COUNT(r.id) as cnt
+                FROM ratings r
+                JOIN tickets t ON r.ticket_id = t.id
+                JOIN engineers e ON t.engineer_id = e.user_id
+                GROUP BY e.name ORDER BY avg_r DESC LIMIT 10
+            """)
+            ratings = [{'name': r['name'], 'rating': round(r['avg_r'], 1), 'count': r['cnt']} for r in await cursor.fetchall()]
+            
+            # Города
+            cursor = await self.conn.execute("""
+                SELECT company_city, COUNT(*) as cnt FROM tickets
+                WHERE company_city IS NOT NULL AND company_city != ''
+                GROUP BY company_city ORDER BY cnt DESC LIMIT 10
+            """)
+            cities = [{'city': r['company_city'], 'cnt': r['cnt']} for r in await cursor.fetchall()]
+
+            # SLA-воронка + время реакции
+            cursor = await self.conn.execute("""
+                SELECT SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as f_open,
+                    SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) as f_prog,
+                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as f_done,
+                    SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END) as f_cancel,
+                    ROUND(AVG(CASE WHEN status IN ('in_progress','completed','canceled')
+                        AND created_at IS NOT NULL
+                        THEN (julianday(COALESCE(closed_at, datetime('now'))) - julianday(created_at))*24 END),1) as avg_h
+                FROM tickets
+            """)
+            sla = await cursor.fetchone()
+
+            cursor = await self.conn.execute("""
+                SELECT COUNT(*) as cnt, ROUND(AVG((julianday(closed_at)-julianday(created_at))*24*60),0) as avg_min
+                FROM tickets WHERE status IN ('in_progress','completed','canceled')
+                  AND created_at IS NOT NULL AND closed_at IS NOT NULL AND engineer_id IS NOT NULL
+            """)
+            reaction = await cursor.fetchone()
+
+            # Типы оборудования
+            cursor = await self.conn.execute("""
+                SELECT machine_info, COUNT(*) as cnt FROM tickets
+                WHERE machine_info IS NOT NULL AND machine_info != ''
+                GROUP BY machine_info ORDER BY cnt DESC LIMIT 20
+            """)
+            ekw = {'Фрезерный': ['фрезер','m3','m1','nc'], 'Лазерный CO2': ['co2','лазер','laser','трубка','0404','0606','1010','1610'],
+                   'Металлорез': ['металлорез','волокон','fiber'], 'Плазморез': ['плазма'], 'Токарный': ['токар']}
+            ec, eo = {}, 0
+            for r in await cursor.fetchall():
+                info = (r['machine_info'] or '').lower()
+                for label, keys in ekw.items():
+                    if any(k in info for k in keys):
+                        ec[label] = ec.get(label, 0) + r['cnt']; break
+                else: eo += r['cnt']
+            if eo: ec['Другое'] = eo
+            equipment = [{'type': k, 'cnt': v} for k, v in sorted(ec.items(), key=lambda x: -x[1])]
+
+            # Топ проблем
+            cursor = await self.conn.execute("""
+                SELECT problem, COUNT(*) as cnt FROM tickets
+                WHERE problem IS NOT NULL AND problem != ''
+                GROUP BY problem ORDER BY cnt DESC LIMIT 20
+            """)
+            pkw = {'Не включается': ['не включает','ошибк','alarm','не запуск'],
+                   'Круги/эллипс': ['круг','эллипс','овал'],
+                   'Двигатель/редуктор': ['двигател','редуктор','шаговый','мотор'],
+                   'Люфт/точность': ['люфт','неточность','допуск','перекос'],
+                   'Резка/кромка': ['резк','кромка','нагар','контур'],
+                   'Юстировка': ['юстировк','центровк','луч'],
+                   'Охлаждение': ['чиллер','охлажден','помпа'],
+                   'ШВП/направляющие': ['швп','направляющ','винт'],
+                   'Контроллер': ['контроллер','плат','электроник','питани'],
+                   'Шпиндель': ['шпиндель']}
+            pc, po = {}, 0
+            for r in await cursor.fetchall():
+                text = (r['problem'] or '').lower()
+                for label, keys in pkw.items():
+                    if any(k in text for k in keys):
+                        pc[label] = pc.get(label, 0) + r['cnt']; break
+                else: po += r['cnt']
+            if po: pc['Прочее'] = po
+            problems = [{'name': k, 'cnt': v} for k, v in sorted(pc.items(), key=lambda x: -x[1])]
+
+            # Оценки, тренд, дни недели, повторы
+            cursor = await self.conn.execute(
+                "SELECT rating, COUNT(*) as cnt FROM ratings WHERE rating BETWEEN 1 AND 5 GROUP BY rating ORDER BY rating")
+            rd = {r['rating']: r['cnt'] for r in await cursor.fetchall()}
+            ratings_dist = [rd.get(i, 0) for i in range(1, 6)]
+
+            cursor = await self.conn.execute(
+                "SELECT CASE WHEN created_at>=datetime('now','-7 days') THEN 't' ELSE 'p' END as w, COUNT(*) as cnt FROM tickets WHERE created_at>=datetime('now','-14 days') GROUP BY w")
+            wd = {r['w']: r['cnt'] for r in await cursor.fetchall()}
+            this_week, prev_week = wd.get('t', 0), wd.get('p', 0)
+
+            cursor = await self.conn.execute(
+                "SELECT CAST(strftime('%w',created_at) AS INTEGER) as dow, COUNT(*) as cnt FROM tickets WHERE created_at IS NOT NULL GROUP BY dow ORDER BY dow")
+            dd = {r['dow']: r['cnt'] for r in await cursor.fetchall()}
+            day_names = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб']
+            dow_load = [dd.get(i, 0) for i in range(7)]
+
+            cursor = await self.conn.execute(
+                "SELECT COUNT(DISTINCT client_id) as total, COUNT(DISTINCT CASE WHEN tc>1 THEN client_id END) as rep FROM (SELECT client_id,COUNT(*) as tc FROM tickets GROUP BY client_id)")
+            rep = await cursor.fetchone()
+        
+        return {
+            'total': row['total'],
+            'open': row['open_count'],
+            'in_progress': row['in_progress'],
+            'closed': row['closed'],
+            'daily_labels': daily_labels,
+            'daily_counts': daily_counts,
+            'eng_names': eng_names,
+            'eng_loads': eng_loads,
+            'eng_avg_times': eng_avg_times,
+            'eng_colors': eng_colors,
+            'ratings': ratings,
+            'cities': cities,
+            'sla_funnel': [sla['f_open'], sla['f_prog'], sla['f_done'], sla['f_cancel']],
+            'sla_avg_h': sla['avg_h'] or 0,
+            'reaction_min': reaction['avg_min'] or 0, 'reaction_cnt': reaction['cnt'] or 0,
+            'equipment': equipment, 'problems': problems,
+            'ratings_dist': ratings_dist,
+            'this_week': this_week, 'prev_week': prev_week,
+            'dow_load': dow_load, 'day_names': day_names,
+            'repeat_pct': round((rep['rep'] or 0) / max(rep['total'] or 1, 1) * 100),
+            'total_clients': rep['total'] or 0, 'repeat_clients': rep['rep'] or 0,
+        }
+
     async def get_engineer_stats(self) -> list[aiosqlite.Row]:
         """
         Retrieves statistics for each engineer, including active and closed tickets.
@@ -591,3 +772,125 @@ class Database:
                 (ticket_id,)
             )
             await self.conn.commit()
+
+    # ─── DAO-свойства для структурированного доступа ─────────────────────
+    # Позволяют обращаться к методам через db.engineers.add(...),
+    # db.tickets.create(...) и т.д. вместо flat-методов db.add_engineer(...).
+    # Обратная совместимость: старые методы (db.add_engineer и др.) продолжают работать.
+
+    class _EngineerAccess:
+        """DAO-обёртка для методов работы с инженерами."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        add = property(lambda self: self._db.add_engineer)
+        delete = property(lambda self: self._db.delete_engineer)
+        get_active = property(lambda self: self._db.get_engineers)
+        get_all = property(lambda self: self._db.get_all_engineers)
+        set_active = property(lambda self: self._db.set_engineer_active)
+        is_engineer = property(lambda self: self._db.is_engineer)
+        has_active_tickets = property(lambda self: self._db.has_active_tickets)
+        set_bitrix_id = property(lambda self: self._db.set_bitrix_user_id)
+        get_bitrix_id = property(lambda self: self._db.get_bitrix_user_id)
+        get_name = property(lambda self: self._db.get_engineer_name)
+
+    class _AdminAccess:
+        """DAO-обёртка для методов работы с администраторами."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        add = property(lambda self: self._db.add_admin)
+        delete = property(lambda self: self._db.delete_admin)
+        get_all = property(lambda self: self._db.get_admins)
+        is_admin = property(lambda self: self._db.is_admin)
+
+    class _TicketAccess:
+        """DAO-обёртка для методов работы с заявками."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        create = property(lambda self: self._db.create_ticket)
+        get = property(lambda self: self._db.get_ticket)
+        get_by_uuid = property(lambda self: self._db.get_ticket_by_uuid)
+        take = property(lambda self: self._db.take_ticket)
+        close = property(lambda self: self._db.close_ticket)
+        get_for_client = property(lambda self: self._db.get_active_ticket_for_client)
+        get_client_history = property(lambda self: self._db.get_client_tickets)
+        get_for_engineer = property(lambda self: self._db.get_active_tickets_for_engineer)
+        get_open = property(lambda self: self._db.get_open_tickets)
+        get_all = property(lambda self: self._db.get_all_tickets)
+        status_counts = property(lambda self: self._db.get_ticket_status_counts)
+        get_by_period = property(lambda self: self._db.get_tickets_by_period)
+        get_expired = property(lambda self: self._db.get_expired_open_tickets)
+        get_expired_not_escalated = property(lambda self: self._db.get_expired_open_tickets_not_escalated)
+        mark_escalated = property(lambda self: self._db.mark_ticket_escalated)
+        clear_escalations = property(lambda self: self._db.clear_ticket_escalations)
+
+    class _MessageAccess:
+        """DAO-обёртка для методов работы с сообщениями."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        save = property(lambda self: self._db.save_message)
+        get_for_ticket = property(lambda self: self._db.get_messages_for_ticket)
+
+    class _RatingAccess:
+        """DAO-обёртка для методов работы с оценками."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        save = property(lambda self: self._db.save_rating)
+        update_comment = property(lambda self: self._db.update_rating_comment)
+        get_for_ticket = property(lambda self: self._db.get_rating_for_ticket)
+        avg = property(lambda self: self._db.get_avg_rating)
+        avg_resolution_time = property(lambda self: self._db.get_avg_resolution_time)
+        by_city = property(lambda self: self._db.get_tickets_by_city)
+
+    class _StatsAccess:
+        """DAO-обёртка для методов статистики и дашборда."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        dashboard = property(lambda self: self._db.get_dashboard_data)
+        engineer_stats = property(lambda self: self._db.get_engineer_stats)
+
+    class _MediaAccess:
+        """DAO-обёртка для методов работы с медиафайлами."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        save = property(lambda self: self._db.save_media)
+        get_for_ticket = property(lambda self: self._db.get_media_for_ticket)
+
+    class _NotificationAccess:
+        """DAO-обёртка для методов работы с уведомлениями."""
+        def __init__(self, db: "Database"):
+            self._db = db
+        save = property(lambda self: self._db.save_ticket_notification)
+        get_for_ticket = property(lambda self: self._db.get_ticket_notifications)
+        delete_for_ticket = property(lambda self: self._db.delete_ticket_notifications)
+
+    @property
+    def engineers(self) -> _EngineerAccess:
+        return self._EngineerAccess(self)
+
+    @property
+    def admins(self) -> _AdminAccess:
+        return self._AdminAccess(self)
+
+    @property
+    def tickets(self) -> _TicketAccess:
+        return self._TicketAccess(self)
+
+    @property
+    def messages(self) -> _MessageAccess:
+        return self._MessageAccess(self)
+
+    @property
+    def ratings(self) -> _RatingAccess:
+        return self._RatingAccess(self)
+
+    @property
+    def stats(self) -> _StatsAccess:
+        return self._StatsAccess(self)
+
+    @property
+    def media(self) -> _MediaAccess:
+        return self._MediaAccess(self)
+
+    @property
+    def notifications(self) -> _NotificationAccess:
+        return self._NotificationAccess(self)

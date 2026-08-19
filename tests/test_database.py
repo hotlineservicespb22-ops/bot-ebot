@@ -288,3 +288,64 @@ async def test_has_active_tickets(db):
     # Завершаем заявку — активных больше нет
     await db.close_ticket(ticket_id, status='completed')
     assert await db.has_active_tickets(777) is False
+class TestDAOAccess:
+    """Tests for DAO access properties on Database."""
+
+    async def test_engineers_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'engineers')
+        assert hasattr(db.engineers, 'get_active')
+        assert hasattr(db.engineers, 'add')
+        assert hasattr(db.engineers, 'is_engineer')
+
+    async def test_admins_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'admins')
+        assert hasattr(db.admins, 'get_all')
+        assert hasattr(db.admins, 'is_admin')
+
+    async def test_tickets_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'tickets')
+        assert hasattr(db.tickets, 'create')
+        assert hasattr(db.tickets, 'get')
+        assert hasattr(db.tickets, 'take')
+        assert hasattr(db.tickets, 'close')
+
+    async def test_ratings_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'ratings')
+        assert hasattr(db.ratings, 'save')
+        assert hasattr(db.ratings, 'avg')
+
+    async def test_stats_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'stats')
+        assert hasattr(db.stats, 'dashboard')
+        assert hasattr(db.stats, 'engineer_stats')
+
+    async def test_media_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'media')
+        assert hasattr(db.media, 'save')
+
+    async def test_notifications_dao_property_exists(self, db_with_ticket):
+        db, _ = db_with_ticket
+        assert hasattr(db, 'notifications')
+        assert hasattr(db.notifications, 'save')
+
+    async def test_engineers_dao_delegates_correctly(self, db_with_ticket):
+        db, _ = db_with_ticket
+        result = await db.engineers.get_active()
+        assert isinstance(result, list)
+
+    async def test_tickets_dao_delegates_correctly(self, db_with_ticket):
+        db, _ = db_with_ticket
+        counts = await db.tickets.status_counts()
+        assert isinstance(counts, dict)
+        assert 'total' in counts
+
+    async def test_ratings_dao_avg_delegates(self, db_with_ticket):
+        db, _ = db_with_ticket
+        result = await db.ratings.avg()
+        assert result is None or isinstance(result, float)

@@ -521,7 +521,7 @@ class TestDeleteTicketNotifications:
         await _delete_ticket_notifications(mock_bot, db, ticket_id, except_engineer_id=fake_engineer_user.id)
 
         # Для инженера 222 сообщение должно быть удалено
-        delete_calls = [call for call in mock_bot.delete_message.call_args_list]
+        delete_calls = list(mock_bot.delete_message.call_args_list)
         assert any(call[1].get("chat_id") == 222 for call in delete_calls)
 
 

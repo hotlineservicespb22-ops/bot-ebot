@@ -8,6 +8,7 @@
 - ticket_timeout_watcher (эскалация просроченных заявок)
 """
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -234,11 +235,9 @@ class TestMainWebhook:
 
             with patch("bot.main.shutdown", new=AsyncMock()):
                 # Основной цикл уйдёт в asyncio.Event().wait(), который сразу бросит KeyboardInterrupt
-                try:
+                with contextlib.suppress(KeyboardInterrupt):
                     await main()
-                except KeyboardInterrupt:
-                    # Ожидаемое прерывание цикла webhook-сервера
-                    pass
+                # # Ожидаемое прерывание цикла webhook-сервера (принято)
 
             mock_bot.set_webhook.assert_awaited_once()
             mock_bot.delete_webhook.assert_awaited_once()
