@@ -118,13 +118,14 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
         key_param = f"?key={MANAGER_DASHBOARD_KEY}"
 
     # KPI-блоки
+    avg_str = f"{avg:.1f}" if avg is not None else "—"
     kpi_html = (
         f'<div class="kpi-row">'
         f'<div class="kpi"><span class="kpi-val">{total}</span>'
         f'<span class="kpi-lbl">Проблемных заявок</span></div>'
         f'<div class="kpi"><span class="kpi-val">{week}</span>'
         f'<span class="kpi-lbl">За последние 7 дней</span></div>'
-        f'<div class="kpi"><span class="kpi-val">{avg:.1f if avg else "—"}</span>'
+        f'<div class="kpi"><span class="kpi-val">{avg_str}</span>'
         f'<span class="kpi-lbl">Средняя оценка проблемных</span></div>'
         f"</div>"
     )
@@ -176,7 +177,7 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
     )
     return web.Response(
         text=_base_page("Дашборд", body),
-        content_type="text/html; charset=utf-8",
+        content_type="text/html",
     )
 
 
@@ -280,7 +281,7 @@ async def _ticket_handler(request: web.Request, db: Database) -> web.Response:
     )
     return web.Response(
         text=_base_page(f"Заявка #{ticket_id}", body),
-        content_type="text/html; charset=utf-8",
+        content_type="text/html",
     )
 
 

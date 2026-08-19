@@ -5,6 +5,8 @@ services:
     build: .
     container_name: hotline-bot
     restart: unless-stopped
+    ports:
+      - "${MANAGER_DASHBOARD_PORT:-8081}:${MANAGER_DASHBOARD_PORT:-8081}"
     env_file:
       - .env
       - .env.txt
