@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from bot.config import ADMIN_IDS, FSM_TIMEOUT, TICKET_CREATE_COOLDOWN
+from bot.config import ADMIN_IDS, FSM_TIMEOUT, MANAGER_IDS, TICKET_CREATE_COOLDOWN
 from bot.database import Database
 from bot.faq import FAQ_ANSWERS, FAQ_SECTIONS
 from bot.keyboards import (
@@ -145,10 +145,9 @@ async def cancel_ticket_by_client(message: Message, bot: Bot, db: Database):
             logging.error(f"Не удалось уведомить инженера {engineer_id} об отмене заявки {ticket_id}: {e}")
 
 @router.callback_query(RatingCallback.filter())
-async def process_rating(callback: CallbackQuery, callback_data: RatingCallback, db: Database, state: FSMContext):
+async def process_rating(callback: CallbackQuery, callback_data: RatingCallback, db: Database, state: FSMContext, bot: Bot):
     """Обрабатывает выбор оценки заявки клиентом."""
-    await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
-    # Проверяем, что оценку ставит клиент этой заявки
+    await callback.answer()
     ticket = await db.get_ticket(callback_data.ticket_id)
     if not ticket:
         await callback.answer("Заявка не найдена.", show_alert=True)
@@ -157,19 +156,57 @@ async def process_rating(callback: CallbackQuery, callback_data: RatingCallback,
         await callback.answer("Вы не можете оценить эту заявку.", show_alert=True)
         return
 
-    # Сохраняем оценку, комментарий можно будет добавить следующим сообщением
+    rating = callback_data.value
     await db.save_rating(
         ticket_id=callback_data.ticket_id,
         client_id=callback.from_user.id,
-        rating=callback_data.value
+        rating=rating
     )
+
+    # Уведомление руководителям при оценке ≤ 3
+    if rating <= 3:
+        await _notify_managers_low_rating(
+            bot, db, ticket, rating, callback.from_user.full_name
+        )
+
     await callback.message.edit_text(
-        f"⭐ Спасибо за оценку <b>{callback_data.value}/5</b>!\n\n"
+        f"⭐ Спасибо за оценку <b>{rating}/5</b>!\n\n"
         "Если хотите, можете оставить комментарий текстом, или нажмите /cancel чтобы завершить."
     )
-    # Устанавливаем FSM-состояние для приёма комментария
     await state.set_state(TicketForm.rating_comment)
     await state.update_data(rating_ticket_id=callback_data.ticket_id)
+
+
+async def _notify_managers_low_rating(
+    bot: Bot, db: Database, ticket: dict, rating: int, client_name: str
+):
+    """Уведомляет всех руководителей о низкой оценке заявки."""
+    if not MANAGER_IDS:
+        return
+
+    engineer_name = "—"
+    if ticket.get("engineer_id"):
+        ename = await db.engineers.get_name(ticket["engineer_id"])
+        if ename:
+            engineer_name = ename
+
+    stars = "⭐" * rating
+    text = (
+        f"⚠️ <b>Низкая оценка заявки</b>\n\n"
+        f"Заявка <b>#{ticket['id']}</b> получила оценку {stars} <b>({rating}/5)</b>\n"
+        f"👨‍🔧 Инженер: <b>{html.escape(engineer_name)}</b>\n"
+        f"👤 Клиент: <b>{html.escape(client_name)}</b>\n"
+        f"🔧 {html.escape(str(ticket.get('machine_info') or '—'))}\n"
+    )
+
+    for mgr_id in MANAGER_IDS:
+        try:
+            await bot.send_message(mgr_id, text)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"Не удалось уведомить руководителя {mgr_id}: {e}"
+            )
+
 
 @router.message(StateFilter(TicketForm.rating_comment))
 async def save_rating_comment(message: Message, state: FSMContext, db: Database):
