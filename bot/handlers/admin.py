@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from bot.config import ADMIN_IDS  # Import global ADMIN_IDS
+from bot.config import ADMIN_IDS, SLA_MINUTES  # Import global ADMIN_IDS and SLA
 from bot.database import Database
 from bot.keyboards import (
     AdminCallback,
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 async def _send_dashboard(target_msg, db: Database, bot: Bot, status_msg=None):
     """Формирует и отправляет HTML-дашборд."""
     import json
-    data = await db.get_dashboard_data()
+    data = await db.get_dashboard_data(sla_minutes=SLA_MINUTES)
     from bot.dashboard import generate_dashboard
     html = generate_dashboard(json.dumps(data, ensure_ascii=False))
     from aiogram.types import BufferedInputFile
@@ -292,6 +292,50 @@ async def cmd_list_engineers(message: Message, db: Database, is_admin: bool, edi
     else:
         await message.answer(text, reply_markup=back_to_admin_kb())
 
+@router.message(Command("set_bitrix"))
+async def cmd_set_bitrix(message: Message, db: Database, is_admin: bool):
+    """Устанавливает соответствие инженера бота пользователю Битрикс24.
+
+    Формат: /set_bitrix <ID_инженера> <ID_пользователя_Битрикс24>
+    """
+    # Явная проверка прав через БД — не полагаемся только на middleware
+    is_admin = await db.is_admin(message.from_user.id)
+    if not is_admin:
+        await message.answer("🚫 У вас нет прав администратора.")
+        return
+
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer(
+            "Используйте: <code>/set_bitrix ID_инженера ID_пользователя_Битрикс24</code>"
+        )
+        return
+
+    try:
+        eng_id = int(args[1])
+        bitrix_id = int(args[2])
+    except ValueError:
+        await message.answer(
+            "❌ ID инженера и ID пользователя Битрикс24 должны быть числами."
+        )
+        return
+
+    # Проверяем, что инженер существует (включая неактивных)
+    engineers = await db.get_all_engineers()
+    if not any(e['user_id'] == eng_id for e in engineers):
+        await message.answer(
+            f"❌ Инженер с ID <code>{eng_id}</code> не найден. "
+            "Сначала добавьте его через /add_eng."
+        )
+        return
+
+    await db.set_bitrix_user_id(eng_id, bitrix_id)
+    await message.answer(
+        f"✅ Для инженера <code>{eng_id}</code> установлен ID пользователя "
+        f"Битрикс24: <code>{bitrix_id}</code>."
+    )
+
+
 @router.message(Command("bulk_add_eng"))
 async def cmd_bulk_add_engineers(message: Message, db: Database, is_admin: bool):
     """Массовое добавление инженеров.
@@ -487,7 +531,7 @@ async def cmd_dashboard(message: Message, db: Database, is_admin: bool):
         await message.answer("🚫 У вас нет прав администратора.")
         return
     
-    data = await db.get_dashboard_data()
+    data = await db.get_dashboard_data(sla_minutes=SLA_MINUTES)
     from bot.dashboard import generate_dashboard
     html = generate_dashboard(json.dumps(data, ensure_ascii=False))
     
@@ -551,6 +595,19 @@ async def cmd_stats(message: Message, db: Database, is_admin: bool, edit: bool =
         if stats_lines:
             text += "\n\n📈 <b>Статистика по инженерам:</b>\n"
             text += "\n".join(stats_lines)
+
+    # Время сессий по инженерам (суммарное и среднее) — фича «учёт времени сессии».
+    session_stats = await db.get_engineer_session_stats()
+    if session_stats:
+        active_sessions = [s for s in session_stats if s['total_seconds'] > 0]
+        if active_sessions:
+            text += "\n\n⏱ <b>Время работы специалистов:</b>\n"
+            for s in active_sessions:
+                text += (
+                    f"  • <b>{html.escape(s['name'])}</b>: "
+                    f"суммарно <b>{s['total_seconds'] // 60}м</b>, "
+                    f"в среднем <b>{s['avg_seconds'] // 60}м</b>\n"
+                )
 
     # Среднее время решения
     avg_time = await db.get_avg_resolution_time()

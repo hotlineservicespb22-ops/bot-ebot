@@ -116,6 +116,19 @@ async def _migration_v9_low_rated_tickets(conn) -> None:
     )
 
 
+async def _migration_v10_followup(conn) -> None:
+    """v10: Поля повторного опроса клиента после закрытия заявки."""
+    await _ensure_column(conn, "tickets", "followup_sent_at", "TEXT")
+    await _ensure_column(conn, "tickets", "related_ticket_id", "INTEGER")
+
+
+async def _migration_v11_session_time(conn) -> None:
+    """v11: Учёт времени сессии инженера по заявке + фиксация времени первого ответа (SLA)."""
+    await _ensure_column(conn, "tickets", "session_started_at", "TEXT")
+    await _ensure_column(conn, "tickets", "session_seconds", "INTEGER DEFAULT 0")
+    await _ensure_column(conn, "tickets", "first_taken_at", "TEXT")
+
+
 # Реестр миграций: version -> (название, функция)
 MIGRATIONS = {
     2: ("ticket_extra_fields", _migration_v2_ticket_fields),
@@ -125,6 +138,8 @@ MIGRATIONS = {
     6: ("ticket_uuid", _migration_v6_ticket_uuid),
     7: ("cascade_delete", _migration_v7_cascade_delete),
     9: ("low_rated_tickets", _migration_v9_low_rated_tickets),
+    10: ("followup_fields", _migration_v10_followup),
+    11: ("session_time_fields", _migration_v11_session_time),
 }
 
 

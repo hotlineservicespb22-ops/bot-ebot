@@ -8,6 +8,21 @@ import aiosqlite
 from bot.migrations import mark_applied, run_migrations
 
 
+def _elapsed_seconds(started_at: str | None, now: datetime.datetime) -> int:
+    """Разница now - started_at в секундах (всегда >= 0).
+
+    Некорректный или пустой timestamp не должен ронять расчёт времени сессии —
+    в этих случаях интервал считается нулевым (безопасно продолжать работу).
+    """
+    if not started_at:
+        return 0
+    try:
+        start = datetime.datetime.fromisoformat(started_at)
+    except (ValueError, TypeError):
+        return 0
+    return max(0, int((now - start).total_seconds()))
+
+
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -289,7 +304,8 @@ class Database:
         contact: str,
         machine_info: str = '',
         company_city: str = '',
-        machine_media_id: str | None = None
+        machine_media_id: str | None = None,
+        related_ticket_id: int | None = None
     ) -> int:
         async with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -297,11 +313,11 @@ class Database:
             cursor = await self.conn.execute(
                 """INSERT INTO tickets (
                     uuid, client_id, client_name, company, equipment_type, brand,
-                    cnc_model, machine_info, company_city, problem, media_id, city, inn_contract, contact, machine_media_id, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    cnc_model, machine_info, company_city, problem, media_id, city, inn_contract, contact, machine_media_id, created_at, related_ticket_id
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ticket_uuid, client_id, client_name, company, equipment_type, brand,
-                    cnc_model, machine_info, company_city, problem, media_id, city, inn_contract, contact, machine_media_id, now
+                    cnc_model, machine_info, company_city, problem, media_id, city, inn_contract, contact, machine_media_id, now, related_ticket_id
                 )
             )
             ticket_id = cursor.lastrowid
@@ -323,25 +339,111 @@ class Database:
 
     async def take_ticket(self, ticket_id: int, engineer_id: int) -> bool:
         async with self.lock:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            # Переключение инженера на другую заявку: фиксируем время, уже отработанное
+            # над остальными его активными заявками (чтобы интервалы суммировались).
+            await self._pause_engineer_sessions(engineer_id, exclude_ticket_id=ticket_id, now=now)
             cursor = await self.conn.execute(
-                "UPDATE tickets SET status = 'in_progress', engineer_id = ? WHERE id = ? AND status = 'open'",
-                (engineer_id, ticket_id)
+                "UPDATE tickets SET status = 'in_progress', engineer_id = ?, "
+                "session_started_at = ?, first_taken_at = ? "
+                "WHERE id = ? AND status = 'open'",
+                (engineer_id, now.isoformat(), now.isoformat(), ticket_id)
             )
             await self.conn.commit()
             return cursor.rowcount > 0
 
     async def close_ticket(self, ticket_id: int, status: str, comment: str = None) -> bool:
-        """Закрывает заявку. Возвращает True, если заявка была закрыта (False — если уже закрыта)."""
+        """Закрывает заявку. Возвращает True, если заявка была закрыта (False — если уже закрыта).
+
+        Перед закрытием накапливает время текущей сессии (now - session_started_at) в
+        session_seconds. Всё выполняется под self.lock, поэтому конкурентное закрытие
+        одной и той же заявки двумя инженерами не задвоит время: второй вызов увидит
+        заявку уже закрытой и вернёт False.
+        """
         async with self.lock:
-            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            # Проверяем, что заявка ещё не закрыта (защита от повторного закрытия)
+            now = datetime.datetime.now(datetime.timezone.utc)
             cursor = await self.conn.execute(
-                "UPDATE tickets SET status = ?, close_comment = ?, closed_at = ? "
-                "WHERE id = ? AND status IN ('open', 'in_progress')",
-                (status, comment, now, ticket_id)
+                "SELECT status, session_started_at, session_seconds FROM tickets WHERE id = ?",
+                (ticket_id,)
+            )
+            row = await cursor.fetchone()
+            if row is None or row['status'] not in ('open', 'in_progress'):
+                return False
+            accrued = (row['session_seconds'] or 0) + _elapsed_seconds(row['session_started_at'], now)
+            cursor = await self.conn.execute(
+                "UPDATE tickets SET status = ?, close_comment = ?, closed_at = ?, "
+                "session_seconds = ?, session_started_at = NULL "
+                "WHERE id = ?",
+                (status, comment, now.isoformat(), accrued, ticket_id)
             )
             await self.conn.commit()
             return cursor.rowcount > 0
+
+    async def _accumulate_session(self, ticket_id: int, now: datetime.datetime) -> None:
+        """Прибавляет истёкшее время открытой сессии к session_seconds и сбрасывает session_started_at."""
+        cursor = await self.conn.execute(
+            "SELECT session_started_at, session_seconds FROM tickets WHERE id = ?", (ticket_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None or row['session_started_at'] is None:
+            return
+        accrued = (row['session_seconds'] or 0) + _elapsed_seconds(row['session_started_at'], now)
+        await self.conn.execute(
+            "UPDATE tickets SET session_seconds = ?, session_started_at = NULL WHERE id = ?",
+            (accrued, ticket_id)
+        )
+
+    async def _pause_engineer_sessions(self, engineer_id: int, exclude_ticket_id: int, now: datetime.datetime) -> None:
+        """Фиксирует время, отработанное инженером над другими активными заявками (при переключении)."""
+        cursor = await self.conn.execute(
+            "SELECT id FROM tickets WHERE engineer_id = ? AND status = 'in_progress' "
+            "AND session_started_at IS NOT NULL AND id != ?",
+            (engineer_id, exclude_ticket_id)
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            await self._accumulate_session(row['id'], now)
+
+    async def reset_stale_sessions(self) -> None:
+        """Сбрасывает «зависшие» session_started_at после перезапуска бота.
+
+        Если бот упал/перезапустился, пока заявка была in_progress, timestamp в прошлом
+        при следующем закрытии заявки насчитал бы часы простоя как рабочее время.
+        Поэтому на старте сбрасываем session_started_at у всех in_progress-заявок:
+        их время начнёт считаться только с момента следующего действия инженера.
+        """
+        async with self.lock:
+            await self.conn.execute(
+                "UPDATE tickets SET session_started_at = NULL WHERE status = 'in_progress'"
+            )
+            await self.conn.commit()
+
+    async def resume_session(self, ticket_id: int) -> None:
+        """Возобновляет сессию заявки при переключении инженера на неё.
+
+        Ставит session_started_at = now ТОЛЬКО если заявка in_progress и сессия
+        ещё не идёт (session_started_at IS NULL) — не перезаписываем уже идущую сессию.
+        """
+        async with self.lock:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            await self.conn.execute(
+                "UPDATE tickets SET session_started_at = ? "
+                "WHERE id = ? AND status = 'in_progress' AND session_started_at IS NULL",
+                (now.isoformat(), ticket_id)
+            )
+            await self.conn.commit()
+
+    async def get_client_ticket_history(self, client_id: int, exclude_ticket_id: int | None = None, limit: int = 3) -> list[aiosqlite.Row]:
+        """Последние закрытые заявки клиента (параметризованный SQL, без конкатенации строк)."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "SELECT id, machine_info, problem, status, closed_at, created_at FROM tickets "
+                "WHERE client_id = ? AND status IN ('completed', 'canceled') "
+                "AND (? IS NULL OR id != ?) "
+                "ORDER BY COALESCE(closed_at, created_at) DESC LIMIT ?",
+                (client_id, exclude_ticket_id, exclude_ticket_id, limit)
+            )
+            return await cursor.fetchall()
 
     async def get_active_ticket_for_client(self, client_id: int) -> aiosqlite.Row | None:
         async with self.lock:
@@ -459,6 +561,31 @@ class Database:
             await self.conn.execute(
                 "DELETE FROM ticket_escalations WHERE ticket_id = ?",
                 (ticket_id,)
+            )
+            await self.conn.commit()
+
+    async def get_tickets_for_followup(self, delay_days: int) -> list[aiosqlite.Row]:
+        """Возвращает завершённые заявки, по которым ещё не отправлялся повторный опрос.
+
+        Только исходные заявки (related_ticket_id IS NULL): дочерние заявки, созданные
+        из ответа «проблема повторилась», повторно не опрашиваются.
+        """
+        async with self.lock:
+            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=delay_days)).isoformat()
+            cursor = await self.conn.execute(
+                "SELECT * FROM tickets WHERE status = 'completed' "
+                "AND followup_sent_at IS NULL AND related_ticket_id IS NULL "
+                "AND closed_at IS NOT NULL AND closed_at < ?",
+                (cutoff,)
+            )
+            return await cursor.fetchall()
+
+    async def mark_followup_sent(self, ticket_id: int) -> None:
+        """Проставляет followup_sent_at (факт отправки опроса)."""
+        async with self.lock:
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            await self.conn.execute(
+                "UPDATE tickets SET followup_sent_at = ? WHERE id = ?", (now, ticket_id)
             )
             await self.conn.commit()
 
@@ -602,8 +729,11 @@ class Database:
             return row['cnt'] if row else 0
 
     
-    async def get_dashboard_data(self) -> dict:
-        """Агрегирует данные для дашборда: KPI, графики, рейтинги."""
+    async def get_dashboard_data(self, sla_minutes: int = 15) -> dict:
+        """Агрегирует данные для дашборда: KPI, графики, рейтинги.
+
+        Аргумент sla_minutes — порог SLA в минутах для метрики «% заявок, взятых в срок».
+        """
         async with self.lock:
             # Всего/открыто/в работе/закрыто
             cursor = await self.conn.execute("""
@@ -793,6 +923,13 @@ class Database:
                     'created': (tk['created_at'] or '')[:10],
                     'chat': chat,
                 })
+
+        # ── Новые метрики: SLA, время сессии, follow-up ────────────────────
+        sla_stats = await self._sla_stats_query(sla_minutes)
+        session_stats = await self._session_totals_query()
+        engineer_sessions = await self._engineer_sessions_query()
+        followup_stats = await self._followup_stats_query()
+
         return {
             'total': row['total'],
             'open': row['open_count'],
@@ -815,6 +952,10 @@ class Database:
             'dow_load': dow_load, 'day_names': day_names,
             'repeat_pct': round((rep['rep'] or 0) / max(rep['total'] or 1, 1) * 100),
             'total_clients': rep['total'] or 0, 'repeat_clients': rep['rep'] or 0,
+            'sla_stats': sla_stats,
+            'session_stats': session_stats,
+            'engineer_sessions': engineer_sessions,
+            'followup_stats': followup_stats,
             'tickets_with_chat': tickets_with_chat,
         }
 
@@ -840,6 +981,78 @@ class Database:
             """
             cursor = await self.conn.execute(query)
             return await cursor.fetchall()
+
+    async def _sla_stats_query(self, sla_minutes: int) -> dict:
+        """% заявок, взятых в работу в пределах SLA (взятие = первое назначение инженера).
+
+        Время реакции = first_taken_at - created_at (first_taken_at фиксируется
+        один раз при переходе open → in_progress и не обнуляется при завершении).
+        Граница включительная: время реакции <= sla_minutes считается «в SLA».
+        Сравнение идёт в целых секундах (strftime('%s')), чтобы исключить
+        float-погрешность на границе SLA.
+        Заявки, которые вообще не были взяты (first_taken_at IS NULL), в знаменатель
+        не попадают — это не завершённый контакт, и он не должен ломать процент.
+        """
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) as taken_total, "
+            "SUM(CASE WHEN (strftime('%s', first_taken_at) - strftime('%s', created_at)) <= ? "
+            "THEN 1 ELSE 0 END) as taken_in_sla "
+            "FROM tickets WHERE first_taken_at IS NOT NULL AND created_at IS NOT NULL",
+            (sla_minutes * 60,)
+        )
+        row = await cursor.fetchone()
+        taken_total = int(row['taken_total'] or 0)
+        taken_in_sla = int(row['taken_in_sla'] or 0)
+        pct = round(taken_in_sla * 100.0 / taken_total) if taken_total else 0
+        return {'taken_total': taken_total, 'taken_in_sla': taken_in_sla, 'in_sla_pct': int(pct)}
+
+    async def _session_totals_query(self) -> dict:
+        cursor = await self.conn.execute(
+            "SELECT COALESCE(SUM(session_seconds),0) as total, COALESCE(AVG(session_seconds),0) as avg "
+            "FROM tickets WHERE status IN ('completed','canceled')"
+        )
+        row = await cursor.fetchone()
+        return {'total_seconds': int(row['total'] or 0), 'avg_seconds': int(row['avg'] or 0)}
+
+    async def _engineer_sessions_query(self) -> list:
+        cursor = await self.conn.execute(
+            "SELECT e.name, e.user_id, COALESCE(SUM(t.session_seconds),0) as total_seconds, "
+            "COALESCE(AVG(t.session_seconds),0) as avg_seconds "
+            "FROM engineers e LEFT JOIN tickets t ON e.user_id = t.engineer_id "
+            "GROUP BY e.user_id, e.name ORDER BY e.name"
+        )
+        result = []
+        for r in await cursor.fetchall():
+            result.append({
+                'name': r['name'] or f"ID:{r['user_id']}",
+                'user_id': r['user_id'],
+                'total_seconds': int(r['total_seconds'] or 0),
+                'avg_seconds': int(r['avg_seconds'] or 0),
+            })
+        return result
+
+    async def _followup_stats_query(self) -> dict:
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM tickets "
+            "WHERE followup_sent_at IS NOT NULL AND followup_sent_at >= datetime('now','-7 days')"
+        )
+        sent = await cursor.fetchone()
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM tickets "
+            "WHERE related_ticket_id IS NOT NULL AND created_at >= datetime('now','-7 days')"
+        )
+        reopened = await cursor.fetchone()
+        return {'sent_week': int(sent['cnt'] or 0), 'reopened_week': int(reopened['cnt'] or 0)}
+
+    async def get_sla_stats(self, sla_minutes: int) -> dict:
+        """Публичная версия расчёта SLA (для тестов и внешнего использования)."""
+        async with self.lock:
+            return await self._sla_stats_query(sla_minutes)
+
+    async def get_engineer_session_stats(self) -> list:
+        """Суммарное и среднее время сессий по каждому инженеру (для /stats и дашборда)."""
+        async with self.lock:
+            return await self._engineer_sessions_query()
 
     # Media CRUD
     async def save_media(self, ticket_id: int, file_id: str, file_type: str, file_path: str, sender_id: int, sender_role: str):

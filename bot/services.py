@@ -35,14 +35,21 @@ async def _notify_client(bot: Bot, ticket, status: str) -> None:
     """Уведомляет клиента о завершении/отмене заявки."""
     icon, text = _status_text(status)
     kb = rating_kb(ticket['id']) if status == "completed" else main_menu()
+    session_note = ""
+    if status == "completed":
+        session_seconds = ticket['session_seconds'] or 0
+        session_note = f"\n\n⏱ Время работы специалиста: {session_seconds // 60}м"
     try:
         await bot.send_message(
             ticket['client_id'],
-            f"{icon} Заявка #{ticket['id']} {text}",
+            f"{icon} Заявка #{ticket['id']} {text}{session_note}",
             reply_markup=kb,
         )
+    # Сбой отправки в Telegram — внешняя ошибка связи, не связанная с состоянием БД
+    # и не требующая отката. Но она не должна пропадать молча: логируем на ERROR,
+    # чтобы клиент, не получивший уведомление, был заметен в логах.
     except Exception as e:
-        logger.warning(f"Не удалось уведомить клиента {ticket['client_id']} о заявке #{ticket['id']}: {e}")
+        logger.error(f"Не удалось уведомить клиента {ticket['client_id']} о заявке #{ticket['id']}: {e}")
 
 
 async def _clear_active_state(state: FSMContext, ticket_id: int) -> None:
@@ -95,6 +102,9 @@ async def complete_ticket(
         return False
 
     await db.tickets.close(ticket_id, status='completed', comment=comment)
+    # Перечитываем заявку: close_ticket начислил session_seconds, которые нужны
+    # в уведомлении клиенту («Время работы специалиста: Xм»).
+    ticket = await db.tickets.get(ticket_id)
     await _notify_client(bot, ticket, 'completed')
     await _clear_active_state(state, ticket_id)
     await _suggest_next_tickets(
@@ -123,6 +133,7 @@ async def cancel_ticket(
         return False
 
     await db.tickets.close(ticket_id, status='canceled', comment=comment)
+    ticket = await db.tickets.get(ticket_id)
     await _notify_client(bot, ticket, 'canceled')
     await _clear_active_state(state, ticket_id)
     await _suggest_next_tickets(
