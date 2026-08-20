@@ -6,14 +6,20 @@ services:
     container_name: hotline-bot
     restart: unless-stopped
     ports:
-      - "${MANAGER_DASHBOARD_PORT:-8081}:${MANAGER_DASHBOARD_PORT:-8081}"
+      # Дашборд руководителя публикуем ТОЛЬКО на loopback хоста (наружу порт не
+      # экспонируется). Для доступа извне используйте reverse-proxy с TLS.
+      - "127.0.0.1:${MANAGER_DASHBOARD_PORT:-8081}:${MANAGER_DASHBOARD_PORT:-8081}"
     env_file:
       - .env
       - .env.txt
     environment:
+      # В контейнере дашборд слушает на всех интерфейсах, чтобы работал проброс
+      # порта; наружу порт всё равно не публикуется (см. ports выше). Из-за этого
+      # MANAGER_DASHBOARD_KEY обязателен — без него бот не стартует (fail fast).
+      MANAGER_DASHBOARD_HOST: "0.0.0.0"
       # Используем Redis для FSM-хранилища (подключается к сервису redis ниже).
       # Чтобы вернуться к памяти — закомментируйте строку REDIS_URL ниже.
-      REDIS_URL: "redis://:${REDIS_PASSWORD:-hotline_redis_pass}@redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0"
     depends_on:
       - redis
     volumes:
@@ -38,10 +44,11 @@ services:
     container_name: hotline-redis
     volumes:
       - redis-data:/data
-    # Пароль обязателен в продакшене. Задаётся через REDIS_PASSWORD в .env.
-    command: redis-server --requirepass ${REDIS_PASSWORD:-hotline_redis_pass}
+    # Пароль обязателен: дефолтного пароля нет, compose упадёт, если REDIS_PASSWORD
+    # не задан или пуст. Задаётся через REDIS_PASSWORD в .env.
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
     healthcheck:
-      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:-hotline_redis_pass}", "ping"]
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}", "ping"]
       interval: 30s
       timeout: 5s
       retries: 3

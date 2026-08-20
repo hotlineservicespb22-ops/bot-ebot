@@ -17,6 +17,9 @@ from aiogram.types import Chat
 from conftest import make_message
 
 from bot.handlers.admin import (
+    add_eng_step_bitrix,
+    add_eng_step_name,
+    add_eng_step_tg_id,
     admin_panel_callback,
     cmd_add_admin,
     cmd_add_engineer,
@@ -151,43 +154,62 @@ class TestAdminManagement:
 class TestEngineerManagement:
     """Тесты для управления инженерами."""
 
-    async def test_add_engineer_success(self, fake_admin_user, admin_chat, db_with_admin):
-        """Проверяет успешное добавление инженера."""
-        message = make_message(fake_admin_user, admin_chat, text="/add_eng 999888777 Иван Петров")
-        await cmd_add_engineer(message, db_with_admin, is_admin=True)
+    async def test_add_engineer_success(self, fake_admin_user, admin_chat, db_with_admin, fsm_context):
+        """Проверяет успешное добавление инженера (пошаговый FSM-диалог)."""
+        # Шаг 0: /add_eng запускает диалог
+        message = make_message(fake_admin_user, admin_chat, text="/add_eng")
+        await cmd_add_engineer(message, db_with_admin, is_admin=True, state=fsm_context)
         message.answer.assert_called_once()
-        call_args = message.answer.call_args
-        assert "добавлен" in call_args[0][0].lower()
+        assert "Шаг 1/3" in message.answer.call_args[0][0]
+
+        # Шаг 1: Telegram ID инженера
+        msg1 = make_message(fake_admin_user, admin_chat, text="999888777")
+        await add_eng_step_tg_id(msg1, fsm_context, db_with_admin)
+        assert "Шаг 2/3" in msg1.answer.call_args[0][0]
+
+        # Шаг 2: имя инженера
+        msg2 = make_message(fake_admin_user, admin_chat, text="Иван Петров")
+        await add_eng_step_name(msg2, fsm_context, db_with_admin)
+        assert "Шаг 3/3" in msg2.answer.call_args[0][0]
+
+        # Шаг 3: ID в Битрикс24 (0 — пропустить привязку)
+        msg3 = make_message(fake_admin_user, admin_chat, text="0")
+        await add_eng_step_bitrix(msg3, fsm_context, db_with_admin)
 
         # Проверяем, что инженер добавлен в БД
         engineers = await db_with_admin.get_engineers()
         eng_ids = [e["user_id"] for e in engineers]
         assert 999888777 in eng_ids
 
-    async def test_add_engineer_no_args(self, fake_admin_user, admin_chat, db_with_admin):
-        """Проверяет добавление инженера без аргументов."""
+    async def test_add_engineer_starts_flow(self, fake_admin_user, admin_chat, db_with_admin, fsm_context):
+        """Проверяет, что /add_eng запускает диалог (аргументы в команде не обязательны)."""
         message = make_message(fake_admin_user, admin_chat, text="/add_eng")
-        await cmd_add_engineer(message, db_with_admin, is_admin=True)
+        await cmd_add_engineer(message, db_with_admin, is_admin=True, state=fsm_context)
         message.answer.assert_called_once()
-        call_args = message.answer.call_args
-        assert "Используйте" in call_args[0][0]
+        assert "Шаг 1/3" in message.answer.call_args[0][0]
 
-    async def test_add_engineer_invalid_id(self, fake_admin_user, admin_chat, db_with_admin):
-        """Проверяет добавление инженера с некорректным ID."""
-        message = make_message(fake_admin_user, admin_chat, text="/add_eng abc Иван")
-        await cmd_add_engineer(message, db_with_admin, is_admin=True)
-        message.answer.assert_called_once()
-        call_args = message.answer.call_args
+    async def test_add_engineer_invalid_id(self, fake_admin_user, admin_chat, db_with_admin, fsm_context):
+        """Проверяет ввод некорректного Telegram ID на шаге 1."""
+        message = make_message(fake_admin_user, admin_chat, text="/add_eng")
+        await cmd_add_engineer(message, db_with_admin, is_admin=True, state=fsm_context)
+
+        msg = make_message(fake_admin_user, admin_chat, text="abc")
+        await add_eng_step_tg_id(msg, fsm_context, db_with_admin)
+        msg.answer.assert_called_once()
+        call_args = msg.answer.call_args
         assert "числом" in call_args[0][0].lower()
 
-    async def test_add_engineer_already_admin(self, fake_admin_user, admin_chat, db_with_admin):
-        """Проверяет добавление инженера с ID администратора."""
+    async def test_add_engineer_already_admin(self, fake_admin_user, admin_chat, db_with_admin, fsm_context):
+        """Проверяет ввод ID администратора на шаге 1."""
         with patch("bot.handlers.admin.ADMIN_IDS", [999888777]):
-            message = make_message(fake_admin_user, admin_chat, text="/add_eng 999888777 Иван")
-            await cmd_add_engineer(message, db_with_admin, is_admin=True)
-            message.answer.assert_called_once()
-            call_args = message.answer.call_args
-            assert "администратором" in call_args[0][0].lower()
+            message = make_message(fake_admin_user, admin_chat, text="/add_eng")
+            await cmd_add_engineer(message, db_with_admin, is_admin=True, state=fsm_context)
+
+            msg = make_message(fake_admin_user, admin_chat, text="999888777")
+            await add_eng_step_tg_id(msg, fsm_context, db_with_admin)
+            msg.answer.assert_called_once()
+            call_args = msg.answer.call_args
+            assert "администратор" in call_args[0][0].lower()
 
     async def test_del_engineer_success(self, fake_admin_user, admin_chat, db_with_admin):
         """Проверяет успешное удаление инженера."""

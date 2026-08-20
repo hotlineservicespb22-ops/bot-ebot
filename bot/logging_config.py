@@ -13,6 +13,7 @@ import logging
 import logging.handlers
 import os
 import re
+import traceback
 
 from bot.config import LOG_FILE, LOG_LEVEL
 
@@ -26,8 +27,10 @@ _VALID_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _SENSITIVE_ENV_VARS = [
     "BOT_TOKEN",
     "BITRIX_WEBHOOK_URL",
+    "MANAGER_DASHBOARD_KEY",
     "REDIS_URL",
     "REDIS_PASSWORD",
+    "WEBHOOK_SECRET_TOKEN",
 ]
 
 
@@ -62,11 +65,29 @@ class SanitizingFilter(logging.Filter):
         self._ensure_patterns()
         if not self._patterns:
             return True
-        msg = record.getMessage()
-        for pattern, replacement in self._patterns:
-            msg = pattern.sub(replacement, msg)
-        record.msg = msg
+
+        def _sanitize(text: str) -> str:
+            for pattern, replacement in self._patterns:
+                text = pattern.sub(replacement, text)
+            return text
+
+        # Основное сообщение лога (как и раньше).
+        record.msg = _sanitize(record.getMessage())
         record.args = None
+
+        # Трассировка исключения: форматируем заранее и прогоняем через тот же
+        # санитайзер. Иначе секреты утекут через traceback, т.к. record.msg его
+        # не содержит — traceback подставляет форматтер уже ПОСЛЕ фильтра.
+        if record.exc_info:
+            try:
+                tb_text = "".join(traceback.format_exception(*record.exc_info))
+            except Exception:
+                tb_text = ""
+            if tb_text:
+                record.exc_text = _sanitize(tb_text)
+            # Форматтер использует готовый record.exc_text вместо record.exc_info.
+            record.exc_info = None
+
         return True
 
 

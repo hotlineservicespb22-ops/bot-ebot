@@ -3,6 +3,7 @@
 """
 import contextlib
 import logging
+import sys
 
 import pytest
 
@@ -177,3 +178,23 @@ class TestSanitizingFilter:
         # Second call should not change anything
         sf._ensure_patterns()
         assert len(sf._patterns or []) == patterns_count
+
+    def test_masks_secret_in_traceback(self, monkeypatch):
+        """Секреты маскируются не только в record.msg, но и в тексте traceback."""
+        monkeypatch.setenv("REDIS_URL", "redis://:traceback_secret_pass@host")
+        lc.SanitizingFilter._initialized = False
+        lc.SanitizingFilter._patterns = None
+        sf = lc.SanitizingFilter()
+        record = None
+        try:
+            raise ValueError("failure with redis://:traceback_secret_pass@host")
+        except ValueError:
+            record = logging.LogRecord(
+                name="test", level=logging.ERROR, pathname="", lineno=0,
+                msg="Something went wrong", args=(), exc_info=sys.exc_info(),
+            )
+            sf.filter(record)
+        assert record is not None
+        assert record.exc_info is None
+        assert record.exc_text is not None
+        assert "traceback_secret_pass" not in record.exc_text

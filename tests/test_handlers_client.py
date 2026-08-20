@@ -577,7 +577,7 @@ class TestProcessRating:
         callback.message = AsyncMock()
         callback.message.edit_text = AsyncMock()
 
-        await process_rating(callback, callback_data, db, client_fsm_context)
+        await process_rating(callback, callback_data, db, client_fsm_context, AsyncMock())
 
         # Оценка должна быть сохранена
         rating = await db.get_rating_for_ticket(ticket_id)
@@ -608,7 +608,7 @@ class TestProcessRating:
         callback.from_user = fake_engineer_user  # Другой пользователь
         callback.answer = AsyncMock()
 
-        await process_rating(callback, callback_data, db, client_fsm_context)
+        await process_rating(callback, callback_data, db, client_fsm_context, AsyncMock())
 
         # Оценка не должна быть сохранена
         rating = await db.get_rating_for_ticket(ticket_id)
@@ -622,7 +622,7 @@ class TestProcessRating:
         callback.from_user = fake_user
         callback.answer = AsyncMock()
 
-        await process_rating(callback, callback_data, db, client_fsm_context)
+        await process_rating(callback, callback_data, db, client_fsm_context, AsyncMock())
         callback.answer.assert_called_with("Заявка не найдена.", show_alert=True)
 
 
