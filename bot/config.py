@@ -49,6 +49,21 @@ try:
 except ValueError:
     logging.getLogger("bot.config").warning("Некорректное значение TICKET_TIMEOUT, используется значение по умолчанию 300")
     TICKET_TIMEOUT = 300
+# SLA по времени первого ответа (в минутах): ожидаемое время от создания заявки
+# до взятия её инженером в работу. Используется в сообщении клиенту и в метрике
+# «% заявок, взятых в SLA» на дашборде.
+try:
+    SLA_MINUTES = int(os.getenv("SLA_MINUTES", "15"))
+except ValueError:
+    logging.getLogger("bot.config").warning("Некорректное значение SLA_MINUTES, используется значение по умолчанию 15")
+    SLA_MINUTES = 15
+# Через сколько дней после завершения заявки клиенту отправляется повторный опрос
+# «Всё ли в порядке / Проблема повторилась» (фоновая задача followup_watcher).
+try:
+    FOLLOWUP_DELAY_DAYS = int(os.getenv("FOLLOWUP_DELAY_DAYS", "7"))
+except ValueError:
+    logging.getLogger("bot.config").warning("Некорректное значение FOLLOWUP_DELAY_DAYS, используется значение по умолчанию 7")
+    FOLLOWUP_DELAY_DAYS = 7
 # Таймаут незавершённой воронки оформления заявки (FSM), в секундах. По умолчанию 30 минут.
 try:
     FSM_TIMEOUT = int(os.getenv("FSM_TIMEOUT", "1800"))
@@ -108,8 +123,13 @@ BITRIX_CHAT_ID = os.getenv("BITRIX_CHAT_ID", "")
 # и в текущей реализации не используется.
 BITRIX_FROM_USER_ID = os.getenv("BITRIX_FROM_USER_ID", "")
 
-# Ключ для доступа к веб-дашборду руководителя (передаётся в URL: ?key=...)
+# Ключ для доступа к веб-дашборду руководителя.
+# Передаётся в заголовке X-Dashboard-Key (query-параметр ?key= оставлен для
+# обратной совместимости и навигации по ссылкам). Сравнение — hmac.compare_digest.
 MANAGER_DASHBOARD_KEY = os.getenv("MANAGER_DASHBOARD_KEY", "")
+# Адрес, на котором веб-дашборд слушает входящие запросы.
+# По умолчанию — только localhost; наружу порт не публикуется.
+MANAGER_DASHBOARD_HOST = os.getenv("MANAGER_DASHBOARD_HOST", "127.0.0.1")
 # Порт веб-дашборда руководителя (по умолчанию 8081, чтобы не конфликтовать с webhook на 8080)
 try:
     MANAGER_DASHBOARD_PORT = int(os.getenv("MANAGER_DASHBOARD_PORT", "8081"))
@@ -117,6 +137,19 @@ except ValueError:
     MANAGER_DASHBOARD_PORT = 8081
 # Публичный URL веб-дашборда (используется в ссылках из Telegram-уведомлений)
 MANAGER_DASHBOARD_URL = os.getenv("MANAGER_DASHBOARD_URL", f"http://localhost:{MANAGER_DASHBOARD_PORT}")
+
+# Fail fast: если дашборд слушает на не-localhost интерфейсе (0.0.0.0 и т.п.),
+# ключ доступа обязателен. Без ключа любой, кто достучится до порта, получит
+# доступ к чувствительным данным (заявки, переписка, контакты).
+_LOCALHOST_HOSTS = {"127.0.0.1", "localhost", "::1"}
+if not MANAGER_DASHBOARD_KEY and MANAGER_DASHBOARD_HOST not in _LOCALHOST_HOSTS:
+    raise ValueError(
+        "MANAGER_DASHBOARD_KEY не задан, а MANAGER_DASHBOARD_HOST="
+        f"'{MANAGER_DASHBOARD_HOST}' не является localhost. Веб-дашборд "
+        "руководителя содержит чувствительные данные и не должен быть доступен "
+        "без ключа извне. Задайте MANAGER_DASHBOARD_KEY или ограничьте "
+        "MANAGER_DASHBOARD_HOST адресом 127.0.0.1."
+    )
 
 # Секретный токен для проверки подлинности входящих webhook-запросов.
 # Задаётся через переменную окружения WEBHOOK_SECRET_TOKEN и сверяется

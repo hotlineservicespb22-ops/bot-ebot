@@ -83,6 +83,33 @@ def format_ticket_detail(ticket) -> str:
     )
     return text
 
+
+def format_client_history(history) -> str:
+    """Компактный блок истории оборудования клиента (закрытые заявки).
+
+    Пустая строка, если истории нет — блок не показывается вовсе.
+    """
+    if not history:
+        return ""
+    lines = ["\n🗂 <b>История оборудования клиента:</b>"]
+    for h in history:
+        machine = str(h['machine_info'] or '—')
+        problem = str(h['problem'] or '—')
+        lines.append(f"  • #{h['id']}: {html.escape(machine[:40])} — {html.escape(problem[:60])}")
+    return "\n".join(lines)
+
+
+async def build_ticket_detail(db: Database, ticket) -> str:
+    """Детальная информация о заявке + история оборудования клиента (если есть)."""
+    detail = format_ticket_detail(ticket)
+    client_id = ticket['client_id']
+    if client_id:
+        history = await db.get_client_ticket_history(
+            client_id, exclude_ticket_id=ticket['id'], limit=3
+        )
+        detail += format_client_history(history)
+    return detail
+
 def _status_badge(ticket) -> str:
     """Цветовой тег: 🔴 просрочка, 🟡 ждёт, 🟢 в работе, ⚪ остальное."""
     status = ticket['status'] if 'status' in ticket else ''
@@ -172,7 +199,10 @@ async def view_ticket_info(callback: CallbackQuery, callback_data: TicketCallbac
     if not ticket:
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
-    detail = format_ticket_detail(ticket)
+    # При переключении инженера на эту заявку (select) возобновляем её сессию.
+    if callback_data.action == "select" and ticket['status'] == 'in_progress':
+        await db.resume_session(callback_data.ticket_id)
+    detail = await build_ticket_detail(db, ticket)
     
     # Показываем правильные кнопки в зависимости от статуса
     if ticket['status'] == 'open':
@@ -265,7 +295,7 @@ async def view_ticket(callback: CallbackQuery, callback_data: TicketCallback, db
         return
 
     await callback.message.edit_text(
-        format_ticket_detail(ticket),
+        await build_ticket_detail(db, ticket),
         reply_markup=engineer_detail_kb(callback_data.ticket_id, mode, index, len(ids))
     )
 
@@ -298,7 +328,7 @@ async def navigate_ticket(callback: CallbackQuery, callback_data: TicketCallback
         return
 
     await callback.message.edit_text(
-        format_ticket_detail(ticket),
+        await build_ticket_detail(db, ticket),
         reply_markup=engineer_detail_kb(ticket_id, mode, index, len(ids))
     )
 
