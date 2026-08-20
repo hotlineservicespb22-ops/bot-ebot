@@ -30,6 +30,7 @@ from bot.handlers.relay import (
     select_ticket_for_reply,
     show_ticket_history,
     view_ticket,
+    view_ticket_info,
 )
 from bot.keyboards import TicketCallback
 
@@ -398,6 +399,51 @@ class TestViewTicket:
 
         await view_ticket(callback, callback_data, db, relay_fsm_context, is_engineer=True)
         callback.answer.assert_called_with("Заявка не найдена.", show_alert=True)
+
+
+class TestViewTicketInfoResumeSession:
+    """Тесты: select-запрос инженера возобновляет сессию заявки (полный путь через view_ticket_info)."""
+
+    async def test_select_calls_resume_session_with_correct_ticket_id(
+        self, db_with_active_ticket, fake_engineer_user, monkeypatch
+    ):
+        """Весь путь от callback (action=select) до db.resume_session(ticket_id)."""
+        db, ticket_id = db_with_active_ticket
+        resume_spy = AsyncMock()
+        monkeypatch.setattr(db, "resume_session", resume_spy)
+
+        callback_data = TicketCallback(action="select", ticket_id=ticket_id)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.message = AsyncMock()
+        callback.message.answer = AsyncMock()
+        callback.answer = AsyncMock()
+
+        await view_ticket_info(callback, callback_data, db)
+
+        # db.resume_session вызван ровно один раз с корректным ticket_id.
+        resume_spy.assert_awaited_once_with(ticket_id)
+        callback.answer.assert_awaited()          # снятие спиннера на кнопке
+        callback.message.answer.assert_awaited_once()  # инженеру показаны детали заявки
+
+    async def test_view_action_does_not_resume_session(
+        self, db_with_active_ticket, fake_engineer_user, monkeypatch
+    ):
+        """action=view не должен возобновлять сессию (возобновление только при select)."""
+        db, ticket_id = db_with_active_ticket
+        resume_spy = AsyncMock()
+        monkeypatch.setattr(db, "resume_session", resume_spy)
+
+        callback_data = TicketCallback(action="view", ticket_id=ticket_id)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.message = AsyncMock()
+        callback.message.answer = AsyncMock()
+        callback.answer = AsyncMock()
+
+        await view_ticket_info(callback, callback_data, db)
+
+        resume_spy.assert_not_awaited()
 
 
 # ===================== Тесты навигации =====================
