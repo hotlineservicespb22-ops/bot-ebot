@@ -62,6 +62,10 @@ def generate_dashboard(data_json: str) -> str:
     parts.append('<div class="kpi blue"><span class="num">' + str(d['reaction_min']) + 'м</span><span class="label">Реакция</span></div>')
     parts.append('<div class="kpi ' + tw_cls + '"><span class="num">' + str(tw) + '</span><span class="label">За неделю</span>' + trend_html + '</div>')
     parts.append('<div class="kpi"><span class="num">' + str(d['repeat_pct']) + '%</span><span class="label">Повторных</span></div>')
+    parts.append('<div class="kpi blue"><span class="num">' + str(((d.get('session_stats') or {}).get('avg_seconds') or 0) // 60) + 'м</span><span class="label">Ср. сессия</span></div>')
+    parts.append('<div class="kpi"><span class="num">' + str((d.get('sla_stats') or {}).get('in_sla_pct') or 0) + '%</span><span class="label">В SLA</span></div>')
+    _fu = d.get('followup_stats') or {}
+    parts.append('<div class="kpi"><span class="num">' + str(_fu.get('sent_week') or 0) + '/' + str(_fu.get('reopened_week') or 0) + '</span><span class="label">Опросы отпр/повт</span></div>')
     parts.append('</div>')
 
     # Статусы
@@ -145,6 +149,18 @@ def generate_dashboard(data_json: str) -> str:
     for c in d['cities']:
         parts.append('<tr><td>' + _html.escape(str(c['city'])) + '</td><td>' + str(c['cnt']) + '</td></tr>')
     parts.append('</tbody></table></div>')
+
+    # Время сессий по инженерам (суммарное и среднее)
+    _sessions = d.get('engineer_sessions') or []
+    if _sessions:
+        parts.append('<div class="card"><h2>Время работы специалистов</h2><table><thead><tr><th>Инженер</th><th>Суммарно</th><th>В среднем</th></tr></thead><tbody>')
+        for s in _sessions:
+            parts.append(
+                '<tr><td>' + _html.escape(str(s.get('name') or '—')) + '</td>'
+                '<td>' + str(int(s.get('total_seconds') or 0) // 60) + 'м</td>'
+                '<td>' + str(int(s.get('avg_seconds') or 0) // 60) + 'м</td></tr>'
+            )
+        parts.append('</tbody></table></div>')
 
     # Переписка по заявкам
     tickets = d.get('tickets_with_chat', [])

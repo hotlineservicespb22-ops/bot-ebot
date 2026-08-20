@@ -5,16 +5,18 @@
   GET /               — список проблемных заявок (оценка ≤ 3)
   GET /ticket/{id}    — детальный просмотр заявки + переписка без медиа
 
-Аутентификация: query-параметр ?key=MANAGER_DASHBOARD_KEY.
-Если MANAGER_DASHBOARD_KEY пуст — доступ открыт (для dev-окружения).
+Аутентификация: заголовок X-Dashboard-Key (query-параметр ?key= оставлен для
+навигации по ссылкам). Сравнение — hmac.compare_digest (constant-time).
+Если MANAGER_DASHBOARD_KEY пуст — доступ открыт (только localhost, dev-режим).
 """
 
+import hmac
 import html as _html
 import logging
 
 from aiohttp import web
 
-from bot.config import MANAGER_DASHBOARD_KEY
+from bot.config import MANAGER_DASHBOARD_KEY, SLA_MINUTES
 from bot.database import Database
 
 logger = logging.getLogger(__name__)
@@ -66,10 +68,19 @@ CSS = (
 
 
 def _check_auth(request: web.Request) -> bool:
-    """Проверяет ключ доступа из query-параметра ?key=..."""
+    """Проверяет ключ доступа: заголовок X-Dashboard-Key или query ?key=.
+
+    Сравнение выполняется через hmac.compare_digest (constant-time), чтобы
+    исключить возможность timing-атаки. Заголовок — основной способ (не попадает
+    в URL, логи и историю браузера); query-параметр оставлен для навигации
+    по внутренним ссылкам и ссылкам из Telegram.
+    """
     if not MANAGER_DASHBOARD_KEY:
-        return True  # ключ не задан — доступ открыт (dev-режим)
-    return request.query.get("key") == MANAGER_DASHBOARD_KEY
+        return True  # ключ не задан — доступ открыт (только localhost, dev-режим)
+    header_key = request.headers.get("X-Dashboard-Key", "")
+    if header_key and hmac.compare_digest(header_key, MANAGER_DASHBOARD_KEY):
+        return True
+    return hmac.compare_digest(request.query.get("key", ""), MANAGER_DASHBOARD_KEY)
 
 
 def _base_page(title: str, body: str) -> str:
@@ -111,6 +122,7 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
     total = await db.low_rated.count()
     avg = await db.low_rated.avg_rating()
     week = await db.low_rated.this_week()
+    dash = await db.get_dashboard_data(sla_minutes=SLA_MINUTES)
 
     key_param = ""
     if MANAGER_DASHBOARD_KEY:
@@ -126,6 +138,12 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
         f'<span class="kpi-lbl">За последние 7 дней</span></div>'
         f'<div class="kpi"><span class="kpi-val">{avg_str}</span>'
         f'<span class="kpi-lbl">Средняя оценка проблемных</span></div>'
+        f'<div class="kpi"><span class="kpi-val" id="w-session">{dash["session_stats"]["avg_seconds"] // 60}м</span>'
+        f'<span class="kpi-lbl">Среднее время сессии</span></div>'
+        f'<div class="kpi"><span class="kpi-val" id="w-sla">{dash["sla_stats"]["in_sla_pct"]}%</span>'
+        f'<span class="kpi-lbl">Заявок взято в SLA</span></div>'
+        f'<div class="kpi"><span class="kpi-val" id="w-followup">{dash["followup_stats"]["sent_week"]}/{dash["followup_stats"]["reopened_week"]}</span>'
+        f'<span class="kpi-lbl">Опросы за нед. (отпр/повтор)</span></div>'
         f"</div>"
     )
 
@@ -173,6 +191,26 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
         f"</div>"
         f"{kpi_html}"
         f"{table_html}"
+        '<script>'
+        "(function(){"
+        "  var q = window.location.search || '';"
+        "  function refresh(){"
+        "    fetch('/api/dashboard-data' + q)"
+        "      .then(function(r){ if(!r.ok){ return; } return r.json(); })"
+        "      .then(function(d){"
+        "        if(!d){ return; }"
+        "        if(d.session_stats){ var e=document.getElementById('w-session');"
+        "          if(e){ e.textContent = Math.floor((d.session_stats.avg_seconds||0)/60) + 'м'; } }"
+        "        if(d.sla_stats){ var e2=document.getElementById('w-sla');"
+        "          if(e2){ e2.textContent = (d.sla_stats.in_sla_pct||0) + '%'; } }"
+        "        if(d.followup_stats){ var e3=document.getElementById('w-followup');"
+        "          if(e3){ e3.textContent = (d.followup_stats.sent_week||0) + '/' + (d.followup_stats.reopened_week||0); } }"
+        "      })"
+        "      .catch(function(){});"
+        "  }"
+        "  setInterval(refresh, 20000);"
+        "})();"
+        "</script>"
     )
     return web.Response(
         text=_base_page("Дашборд", body),
@@ -299,9 +337,17 @@ def create_app(db: Database) -> web.Application:
     async def health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def dashboard_data(request: web.Request) -> web.Response:
+        """JSON-эндпоинт для живого дашборда. Защищён тем же MANAGER_DASHBOARD_KEY."""
+        if not _check_auth(request):
+            return web.Response(status=403, text="Forbidden")
+        data = await db.get_dashboard_data(sla_minutes=SLA_MINUTES)
+        return web.json_response(data)
+
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/ticket/{id}", ticket_detail)
+    app.router.add_get("/api/dashboard-data", dashboard_data)
     app.router.add_get("/health", health)
 
     return app
