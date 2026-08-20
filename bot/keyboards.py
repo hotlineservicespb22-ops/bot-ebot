@@ -18,6 +18,10 @@ class RatingCallback(CallbackData, prefix="rating"):
     ticket_id: int
     value: int
 
+class FollowupCallback(CallbackData, prefix="followup"):
+    action: str  # "ok" (всё в порядке) | "problem" (проблема повторилась)
+    ticket_id: int
+
 class FaqCallback(CallbackData, prefix="faq"):
     action: str
     section_id: str = ""
@@ -65,6 +69,21 @@ def engineer_default_menu_kb():
 def engineer_main_menu():
     """Главное меню инженера с кнопками управления заявками."""
     return engineer_default_menu_kb()
+
+def followup_kb(ticket_id: int) -> InlineKeyboardMarkup:
+    """Inline-клавиатура повторного опроса клиента после завершения заявки."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Всё в порядке",
+                callback_data=FollowupCallback(action="ok", ticket_id=ticket_id).pack()
+            ),
+            InlineKeyboardButton(
+                text="⚠️ Проблема повторилась",
+                callback_data=FollowupCallback(action="problem", ticket_id=ticket_id).pack()
+            ),
+        ]
+    ])
 
 def contact_kb():
     """Reply-клавиатура с кнопкой запроса контакта для последнего шага FSM."""

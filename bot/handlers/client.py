@@ -10,11 +10,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from bot.config import ADMIN_IDS, FSM_TIMEOUT, MANAGER_IDS, TICKET_CREATE_COOLDOWN
+from bot.config import ADMIN_IDS, FSM_TIMEOUT, MANAGER_IDS, SLA_MINUTES, TICKET_CREATE_COOLDOWN
 from bot.database import Database
 from bot.faq import FAQ_ANSWERS, FAQ_SECTIONS
 from bot.keyboards import (
     FaqCallback,
+    FollowupCallback,
     MyRequestsCallback,
     RatingCallback,
     active_ticket_menu_kb,
@@ -756,7 +757,78 @@ async def ticket_contact(message: Message, state: FSMContext, bot: Bot, db: Data
 
     await message.answer(
         f"✅ <b>Заявка #{ticket_id} принята!</b>\n"
+        f"⏱ Ожидаемое время реакции — до {SLA_MINUTES} мин.\n"
         "Дежурный инженер подключится к диалогу в ближайшее время. "
         "Все дальнейшие сообщения, отправленные сюда, будут переданы специалисту. Вы можете отменить заявку через меню ниже.",
         reply_markup=active_ticket_menu_kb()
     )
+
+
+@router.callback_query(FollowupCallback.filter())
+async def followup_callback_handler(
+    callback: CallbackQuery,
+    callback_data: FollowupCallback,
+    db: Database,
+    bot: Bot,
+):
+    """Обрабатывает ответы на повторный опрос после завершения заявки."""
+    ticket_id = callback_data.ticket_id
+
+    if callback_data.action == "ok":
+        await callback.answer("Спасибо за ответ! Рады, что всё в порядке. ✅")
+        try:
+            await callback.message.edit_text(
+                (callback.message.text or "") + "\n\n✅ Клиент подтвердил: всё в порядке."
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось обновить сообщение follow-up по заявке #{ticket_id}: {e}")
+        return
+
+    # action == "problem": клиент сообщил о повторной проблеме — создаём новую заявку.
+    original = await db.get_ticket(ticket_id)
+    if not original:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    new_ticket_id = await db.create_ticket(
+        client_id=original['client_id'],
+        client_name=original['client_name'] or '',
+        company='',
+        equipment_type='',
+        brand='',
+        cnc_model='',
+        problem=original['problem'] or '',
+        media_id=None,
+        city='',
+        inn_contract='',
+        contact=original['contact'] or '',
+        machine_info=original['machine_info'] or '',
+        company_city=original['company_city'] or '',
+        related_ticket_id=ticket_id,
+    )
+
+    await callback.answer(
+        "Принято! Мы создали новую заявку по вашей проблеме. Инженер скоро свяжется с вами. 🛠"
+    )
+    try:
+        await callback.message.edit_text(
+            (callback.message.text or "")
+            + f"\n\n⚠️ Клиент сообщил о повторной проблеме — создана заявка #{new_ticket_id}."
+        )
+    except Exception as e:
+        logging.warning(f"Не удалось обновить сообщение follow-up по заявке #{ticket_id}: {e}")
+
+    # Уведомляем инженеров о новой (повторной) заявке.
+    engineers = await db.get_engineers()
+    ticket_text = (
+        f"🚨 <b>Повторная заявка #{new_ticket_id}</b> (связана с #{ticket_id})\n\n"
+        f"🏢 <b>Компания/Город:</b> {html.escape(str(original['company_city'] or '—'))}\n"
+        f"🔧 <b>Станок:</b> {html.escape(str(original['machine_info'] or '—'))}\n"
+        f"📝 <b>Проблема:</b> {html.escape(str(original['problem'] or '—'))}\n"
+        f"📞 <b>Контакты:</b> {html.escape(str(original['contact'] or '—'))}"
+    )
+    for row in engineers:
+        try:
+            await bot.send_message(row['user_id'], ticket_text, reply_markup=ticket_action_kb(new_ticket_id))
+        except Exception as e:
+            logging.error(f"Не удалось уведомить инженера {row['user_id']} о повторной заявке #{new_ticket_id}: {e}")

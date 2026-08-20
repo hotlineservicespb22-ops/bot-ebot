@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import datetime
+import hmac
 import html
 import logging
 import os
@@ -26,7 +27,9 @@ from bot.config import (
     ADMIN_IDS,
     BOT_TOKEN,
     DB_PATH,
+    FOLLOWUP_DELAY_DAYS,
     LOG_LEVEL,
+    MANAGER_DASHBOARD_HOST,
     MANAGER_DASHBOARD_PORT,
     REDIS_URL,
     TICKET_TIMEOUT,
@@ -38,6 +41,7 @@ from bot.config import (
 )
 from bot.database import Database
 from bot.handlers import admin, client, engineer, manager, relay
+from bot.keyboards import followup_kb
 from bot.logging_config import setup_logging
 from bot.middlewares import DbSessionMiddleware, RoleMiddleware, ThrottlingMiddleware
 from bot.web_dashboard import create_app as create_dashboard_app
@@ -184,6 +188,9 @@ async def main():
     await db.connect()
     await db.init_db()
     await db.migrate()
+    # Сбрасываем «зависшие» сессии после перезапуска: если бот упал, пока заявка
+    # была in_progress, старый session_started_at начислил бы часы простоя как работу.
+    await db.reset_stale_sessions()
 
     # Bot and Dispatcher initialization
     # Глобальная настройка HTML-разметки: все сообщения по умолчанию парсятся как HTML
@@ -217,10 +224,14 @@ async def main():
     dashboard_app = create_dashboard_app(db)
     dashboard_runner = web.AppRunner(dashboard_app)
     await dashboard_runner.setup()
-    dashboard_site = web.TCPSite(dashboard_runner, "0.0.0.0", MANAGER_DASHBOARD_PORT)
+    dashboard_site = web.TCPSite(
+        dashboard_runner, MANAGER_DASHBOARD_HOST, MANAGER_DASHBOARD_PORT
+    )
     await dashboard_site.start()
     logger.info(
-        "Веб-дашборд руководителя запущен на http://0.0.0.0:%s", MANAGER_DASHBOARD_PORT
+        "Веб-дашборд руководителя запущен на http://%s:%s",
+        MANAGER_DASHBOARD_HOST,
+        MANAGER_DASHBOARD_PORT,
     )
 
     # Запускаем фоновую задачу контроля таймаутов заявок
@@ -229,6 +240,8 @@ async def main():
     # (watchdog.sh) по этому файлу определяет, жив ли event loop, и при зависании
     # автоматически перезапускает контейнер.
     heartbeat_task = asyncio.create_task(heartbeat_writer())
+    # Фоновая задача повторного опроса клиентов после завершения заявок.
+    followup_task = asyncio.create_task(followup_watcher(bot, db))
 
     try:
         if WEBHOOK_URL:
@@ -252,7 +265,7 @@ async def main():
                 @middleware
                 async def secret_token_middleware(request, handler):
                     header_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-                    if header_token != WEBHOOK_SECRET_TOKEN:
+                    if not hmac.compare_digest(header_token, WEBHOOK_SECRET_TOKEN):
                         logger.warning(
                             "Webhook: неверный или отсутствующий secret token "
                             "(запрос с %s)", request.remote
@@ -282,6 +295,7 @@ async def main():
     finally:
         timeout_task.cancel()
         heartbeat_task.cancel()
+        followup_task.cancel()
         if WEBHOOK_URL:
             await bot.delete_webhook()
         await shutdown()
@@ -333,6 +347,51 @@ async def ticket_timeout_watcher(bot: Bot, db: Database):
         except Exception as e:
             logger.error(f"Ошибка в фоновой задаче timeout-проверки: {e}")
         await asyncio.sleep(check_interval)
+
+
+async def run_followup_check(bot: Bot, db: Database) -> None:
+    """Один проход follow-up: рассылает опросы по завершённым заявкам.
+
+    Выделен отдельно от цикла, чтобы его можно было тестировать без реального ожидания.
+    """
+    tickets = await db.get_tickets_for_followup(FOLLOWUP_DELAY_DAYS)
+    for ticket in tickets:
+        if not ticket['client_id']:
+            logger.error("Followup: у заявки #%s нет client_id — опрос пропущен", ticket['id'])
+            continue
+        # Проставляем ПЕРЕД отправкой — см. комментарий в docstring followup_watcher.
+        await db.mark_followup_sent(ticket['id'])
+        try:
+            await bot.send_message(
+                ticket['client_id'],
+                f"👋 <b>Здравствуйте!</b>\n\n"
+                f"Недавно мы завершили вашу заявку #{ticket['id']}. "
+                "Проверьте, пожалуйста, как работает оборудование:",
+                reply_markup=followup_kb(ticket['id']),
+            )
+        except Exception as e:
+            logger.error(
+                "Не удалось отправить повторный опрос клиенту %s по заявке #%s: %s",
+                ticket['client_id'], ticket['id'], e,
+            )
+
+
+async def followup_watcher(bot: Bot, db: Database):
+    """Фоновая задача: раз в час рассылает повторные опросы по завершённым заявкам.
+
+    Опрашиваются завершённые заявки старше FOLLOWUP_DELAY_DAYS без followup_sent_at.
+    Факт отправки проставляется ДО вызова send_message, чтобы:
+      - заблокировавший бота клиент не вызывал бесконечный retry каждый час;
+      - сбой сети не приводил к повторным отправкам (идемпотентность при рестарте).
+    При ошибке отправки факт логируется на уровне ERROR — данные не теряются молча.
+    """
+    FOLLOWUP_INTERVAL = 3600  # 1 час
+    while True:
+        try:
+            await run_followup_check(bot, db)
+        except Exception as e:
+            logger.error(f"Ошибка в фоновой задаче followup-опроса: {e}")
+        await asyncio.sleep(FOLLOWUP_INTERVAL)
 
 
 def _write_heartbeat(filepath: str, data: str) -> None:
