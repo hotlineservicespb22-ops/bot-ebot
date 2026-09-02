@@ -86,3 +86,4 @@ class TestDashboardDataEndpoint:
             assert "sla_stats" in data
             assert "session_stats" in data
             assert "followup_stats" in data
+            assert "avg_reaction" in data

@@ -60,6 +60,8 @@ def generate_dashboard(data_json: str) -> str:
     parts.append('<div class="kpi red"><span class="num">' + str(d['in_progress']) + '</span><span class="label">В работе</span></div>')
     parts.append('<div class="kpi green"><span class="num">' + str(d['closed']) + '</span><span class="label">Закрыто</span></div>')
     parts.append('<div class="kpi blue"><span class="num">' + str(d['reaction_min']) + 'м</span><span class="label">Реакция</span></div>')
+    _ar = d.get('avg_reaction') or {}
+    parts.append('<div class="kpi blue"><span class="num">' + str(_ar.get('avg_min') or 0) + 'м</span><span class="label">Ср. реакция</span></div>')
     parts.append('<div class="kpi ' + tw_cls + '"><span class="num">' + str(tw) + '</span><span class="label">За неделю</span>' + trend_html + '</div>')
     parts.append('<div class="kpi"><span class="num">' + str(d['repeat_pct']) + '%</span><span class="label">Повторных</span></div>')
     parts.append('<div class="kpi blue"><span class="num">' + str(((d.get('session_stats') or {}).get('avg_seconds') or 0) // 60) + 'м</span><span class="label">Ср. сессия</span></div>')

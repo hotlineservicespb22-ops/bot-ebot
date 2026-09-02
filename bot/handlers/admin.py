@@ -336,6 +336,57 @@ async def cmd_set_bitrix(message: Message, db: Database, is_admin: bool):
     )
 
 
+async def _set_test_flag(message: Message, db: Database, is_test: bool) -> None:
+    """Общая реализация /mark_test и /unmark_test."""
+    is_admin = await db.is_admin(message.from_user.id)
+    if not is_admin:
+        await message.answer("🚫 У вас нет прав администратора.")
+        return
+
+    cmd_name = "mark_test" if is_test else "unmark_test"
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(f"Используйте: <code>/{cmd_name} ID_заявки</code>")
+        return
+
+    try:
+        ticket_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID заявки должен быть числом.")
+        return
+
+    updated = await db.set_ticket_test_flag(ticket_id, is_test)
+    if not updated:
+        await message.answer(f"❌ Заявка <code>{ticket_id}</code> не найдена.")
+        return
+
+    if is_test:
+        await message.answer(
+            f"🧪 Заявка <code>{ticket_id}</code> помечена как тестовая — "
+            "исключена из статистики дашборда. На обработку заявки (чат, статусы) это не влияет."
+        )
+    else:
+        await message.answer(f"✅ С заявки <code>{ticket_id}</code> снята пометка «тестовая».")
+
+
+@router.message(Command("mark_test"))
+async def cmd_mark_test(message: Message, db: Database):
+    """Помечает заявку как тестовую — исключает её из статистики дашборда.
+
+    Формат: /mark_test <ID_заявки>
+    """
+    await _set_test_flag(message, db, is_test=True)
+
+
+@router.message(Command("unmark_test"))
+async def cmd_unmark_test(message: Message, db: Database):
+    """Снимает пометку «тестовая» с заявки — она снова учитывается в статистике.
+
+    Формат: /unmark_test <ID_заявки>
+    """
+    await _set_test_flag(message, db, is_test=False)
+
+
 @router.message(Command("bulk_add_eng"))
 async def cmd_bulk_add_engineers(message: Message, db: Database, is_admin: bool):
     """Массовое добавление инженеров.

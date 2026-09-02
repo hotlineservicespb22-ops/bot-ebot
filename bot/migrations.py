@@ -129,6 +129,12 @@ async def _migration_v11_session_time(conn) -> None:
     await _ensure_column(conn, "tickets", "first_taken_at", "TEXT")
 
 
+async def _migration_v12_test_flag(conn) -> None:
+    """v12: Флаг «тестовая заявка» — исключает заявку из статистики дашборда,
+    не влияя на её обработку (чат, статусы и т.д.)."""
+    await _ensure_column(conn, "tickets", "is_test", "INTEGER DEFAULT 0")
+
+
 # Реестр миграций: version -> (название, функция)
 MIGRATIONS = {
     2: ("ticket_extra_fields", _migration_v2_ticket_fields),
@@ -140,6 +146,7 @@ MIGRATIONS = {
     9: ("low_rated_tickets", _migration_v9_low_rated_tickets),
     10: ("followup_fields", _migration_v10_followup),
     11: ("session_time_fields", _migration_v11_session_time),
+    12: ("ticket_test_flag", _migration_v12_test_flag),
 }
 
 

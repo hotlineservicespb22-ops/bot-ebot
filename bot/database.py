@@ -742,14 +742,14 @@ class Database:
                     SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_count,
                     SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) as in_progress,
                     SUM(CASE WHEN status IN ('completed','canceled') THEN 1 ELSE 0 END) as closed
-                FROM tickets
+                FROM tickets WHERE (is_test IS NULL OR is_test = 0)
             """)
             row = await cursor.fetchone()
-            
+
             # Заявки по дням (последние 14 дней)
             cursor = await self.conn.execute("""
                 SELECT DATE(created_at) as day, COUNT(*) as cnt
-                FROM tickets WHERE created_at IS NOT NULL
+                FROM tickets WHERE created_at IS NOT NULL AND (is_test IS NULL OR is_test = 0)
                 GROUP BY day ORDER BY day DESC LIMIT 14
             """)
             daily = await cursor.fetchall()
@@ -764,7 +764,7 @@ class Database:
                     AVG(CASE WHEN t.closed_at IS NOT NULL AND t.created_at IS NOT NULL
                         THEN (julianday(t.closed_at) - julianday(t.created_at)) * 24 END) as avg_hours
                 FROM engineers e
-                LEFT JOIN tickets t ON e.user_id = t.engineer_id
+                LEFT JOIN tickets t ON e.user_id = t.engineer_id AND (t.is_test IS NULL OR t.is_test = 0)
                 GROUP BY e.user_id, e.name
                 ORDER BY active DESC
             """)
@@ -779,16 +779,16 @@ class Database:
             cursor = await self.conn.execute("""
                 SELECT e.name, AVG(r.rating) as avg_r, COUNT(r.id) as cnt
                 FROM ratings r
-                JOIN tickets t ON r.ticket_id = t.id
+                JOIN tickets t ON r.ticket_id = t.id AND (t.is_test IS NULL OR t.is_test = 0)
                 JOIN engineers e ON t.engineer_id = e.user_id
                 GROUP BY e.name ORDER BY avg_r DESC LIMIT 10
             """)
             ratings = [{'name': r['name'], 'rating': round(r['avg_r'], 1), 'count': r['cnt']} for r in await cursor.fetchall()]
-            
+
             # Города
             cursor = await self.conn.execute("""
                 SELECT company_city, COUNT(*) as cnt FROM tickets
-                WHERE company_city IS NOT NULL AND company_city != ''
+                WHERE company_city IS NOT NULL AND company_city != '' AND (is_test IS NULL OR is_test = 0)
                 GROUP BY company_city ORDER BY cnt DESC LIMIT 10
             """)
             cities = [{'city': r['company_city'], 'cnt': r['cnt']} for r in await cursor.fetchall()]
@@ -802,7 +802,7 @@ class Database:
                     ROUND(AVG(CASE WHEN status IN ('in_progress','completed','canceled')
                         AND created_at IS NOT NULL
                         THEN (julianday(COALESCE(closed_at, datetime('now'))) - julianday(created_at))*24 END),1) as avg_h
-                FROM tickets
+                FROM tickets WHERE (is_test IS NULL OR is_test = 0)
             """)
             sla = await cursor.fetchone()
 
@@ -810,13 +810,14 @@ class Database:
                 SELECT COUNT(*) as cnt, ROUND(AVG((julianday(closed_at)-julianday(created_at))*24*60),0) as avg_min
                 FROM tickets WHERE status IN ('in_progress','completed','canceled')
                   AND created_at IS NOT NULL AND closed_at IS NOT NULL AND engineer_id IS NOT NULL
+                  AND (is_test IS NULL OR is_test = 0)
             """)
             reaction = await cursor.fetchone()
 
             # Типы оборудования
             cursor = await self.conn.execute("""
                 SELECT machine_info, COUNT(*) as cnt FROM tickets
-                WHERE machine_info IS NOT NULL AND machine_info != ''
+                WHERE machine_info IS NOT NULL AND machine_info != '' AND (is_test IS NULL OR is_test = 0)
                 GROUP BY machine_info ORDER BY cnt DESC LIMIT 20
             """)
             ekw = {'Фрезерный': ['фрезер','m3','m1','nc'], 'Лазерный CO2': ['co2','лазер','laser','трубка','0404','0606','1010','1610'],
@@ -834,7 +835,7 @@ class Database:
             # Топ проблем
             cursor = await self.conn.execute("""
                 SELECT problem, COUNT(*) as cnt FROM tickets
-                WHERE problem IS NOT NULL AND problem != ''
+                WHERE problem IS NOT NULL AND problem != '' AND (is_test IS NULL OR is_test = 0)
                 GROUP BY problem ORDER BY cnt DESC LIMIT 20
             """)
             pkw = {'Не включается': ['не включает','ошибк','alarm','не запуск'],
@@ -859,26 +860,31 @@ class Database:
 
             # Оценки, тренд, дни недели, повторы
             cursor = await self.conn.execute(
-                "SELECT rating, COUNT(*) as cnt FROM ratings WHERE rating BETWEEN 1 AND 5 GROUP BY rating ORDER BY rating")
+                "SELECT r.rating, COUNT(*) as cnt FROM ratings r "
+                "JOIN tickets t ON r.ticket_id = t.id AND (t.is_test IS NULL OR t.is_test = 0) "
+                "WHERE r.rating BETWEEN 1 AND 5 GROUP BY r.rating ORDER BY r.rating")
             rd = {r['rating']: r['cnt'] for r in await cursor.fetchall()}
             ratings_dist = [rd.get(i, 0) for i in range(1, 6)]
 
             cursor = await self.conn.execute(
-                "SELECT CASE WHEN created_at>=datetime('now','-7 days') THEN 't' ELSE 'p' END as w, COUNT(*) as cnt FROM tickets WHERE created_at>=datetime('now','-14 days') GROUP BY w")
+                "SELECT CASE WHEN created_at>=datetime('now','-7 days') THEN 't' ELSE 'p' END as w, COUNT(*) as cnt "
+                "FROM tickets WHERE created_at>=datetime('now','-14 days') AND (is_test IS NULL OR is_test = 0) GROUP BY w")
             wd = {r['w']: r['cnt'] for r in await cursor.fetchall()}
             this_week, prev_week = wd.get('t', 0), wd.get('p', 0)
 
             cursor = await self.conn.execute(
-                "SELECT CAST(strftime('%w',created_at) AS INTEGER) as dow, COUNT(*) as cnt FROM tickets WHERE created_at IS NOT NULL GROUP BY dow ORDER BY dow")
+                "SELECT CAST(strftime('%w',created_at) AS INTEGER) as dow, COUNT(*) as cnt FROM tickets "
+                "WHERE created_at IS NOT NULL AND (is_test IS NULL OR is_test = 0) GROUP BY dow ORDER BY dow")
             dd = {r['dow']: r['cnt'] for r in await cursor.fetchall()}
             day_names = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб']
             dow_load = [dd.get(i, 0) for i in range(7)]
 
             cursor = await self.conn.execute(
-                "SELECT COUNT(DISTINCT client_id) as total, COUNT(DISTINCT CASE WHEN tc>1 THEN client_id END) as rep FROM (SELECT client_id,COUNT(*) as tc FROM tickets GROUP BY client_id)")
+                "SELECT COUNT(DISTINCT client_id) as total, COUNT(DISTINCT CASE WHEN tc>1 THEN client_id END) as rep FROM "
+                "(SELECT client_id,COUNT(*) as tc FROM tickets WHERE (is_test IS NULL OR is_test = 0) GROUP BY client_id)")
             rep = await cursor.fetchone()
-        
-# Заявки с перепиской для дашборда (последние 30, любые статусы)
+
+            # Заявки с перепиской для дашборда (последние 30, любые статусы)
             cursor = await self.conn.execute("""
                 SELECT t.id, t.client_name, t.company_city, t.machine_info,
                     t.problem, t.status, t.created_at,
@@ -887,6 +893,7 @@ class Database:
                 FROM tickets t
                 LEFT JOIN engineers e ON t.engineer_id = e.user_id
                 LEFT JOIN ratings r ON t.id = r.ticket_id
+                WHERE (t.is_test IS NULL OR t.is_test = 0)
                 ORDER BY t.id DESC LIMIT 30
             """)
             tickets_raw = await cursor.fetchall()
@@ -929,6 +936,7 @@ class Database:
         session_stats = await self._session_totals_query()
         engineer_sessions = await self._engineer_sessions_query()
         followup_stats = await self._followup_stats_query()
+        avg_reaction = await self._avg_reaction_query()
 
         return {
             'total': row['total'],
@@ -956,6 +964,7 @@ class Database:
             'session_stats': session_stats,
             'engineer_sessions': engineer_sessions,
             'followup_stats': followup_stats,
+            'avg_reaction': avg_reaction,
             'tickets_with_chat': tickets_with_chat,
         }
 
@@ -997,7 +1006,8 @@ class Database:
             "SELECT COUNT(*) as taken_total, "
             "SUM(CASE WHEN (strftime('%s', first_taken_at) - strftime('%s', created_at)) <= ? "
             "THEN 1 ELSE 0 END) as taken_in_sla "
-            "FROM tickets WHERE first_taken_at IS NOT NULL AND created_at IS NOT NULL",
+            "FROM tickets WHERE first_taken_at IS NOT NULL AND created_at IS NOT NULL "
+            "AND (is_test IS NULL OR is_test = 0)",
             (sla_minutes * 60,)
         )
         row = await cursor.fetchone()
@@ -1006,10 +1016,25 @@ class Database:
         pct = round(taken_in_sla * 100.0 / taken_total) if taken_total else 0
         return {'taken_total': taken_total, 'taken_in_sla': taken_in_sla, 'in_sla_pct': int(pct)}
 
+    async def _avg_reaction_query(self) -> dict:
+        """Среднее время реакции: от создания заявки до взятия инженером (в минутах).
+
+        Вычисляется как AVG(first_taken_at - created_at) для всех заявок,
+        которые были взяты в работу (first_taken_at IS NOT NULL).
+        """
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) as cnt, "
+            "ROUND(AVG((julianday(first_taken_at) - julianday(created_at)) * 24 * 60), 0) as avg_min "
+            "FROM tickets WHERE first_taken_at IS NOT NULL AND created_at IS NOT NULL "
+            "AND (is_test IS NULL OR is_test = 0)"
+        )
+        row = await cursor.fetchone()
+        return {'cnt': int(row['cnt'] or 0), 'avg_min': int(row['avg_min'] or 0)}
+
     async def _session_totals_query(self) -> dict:
         cursor = await self.conn.execute(
             "SELECT COALESCE(SUM(session_seconds),0) as total, COALESCE(AVG(session_seconds),0) as avg "
-            "FROM tickets WHERE status IN ('completed','canceled')"
+            "FROM tickets WHERE status IN ('completed','canceled') AND (is_test IS NULL OR is_test = 0)"
         )
         row = await cursor.fetchone()
         return {'total_seconds': int(row['total'] or 0), 'avg_seconds': int(row['avg'] or 0)}
@@ -1019,6 +1044,7 @@ class Database:
             "SELECT e.name, e.user_id, COALESCE(SUM(t.session_seconds),0) as total_seconds, "
             "COALESCE(AVG(t.session_seconds),0) as avg_seconds "
             "FROM engineers e LEFT JOIN tickets t ON e.user_id = t.engineer_id "
+            "AND (t.is_test IS NULL OR t.is_test = 0) "
             "GROUP BY e.user_id, e.name ORDER BY e.name"
         )
         result = []
@@ -1034,15 +1060,29 @@ class Database:
     async def _followup_stats_query(self) -> dict:
         cursor = await self.conn.execute(
             "SELECT COUNT(*) as cnt FROM tickets "
-            "WHERE followup_sent_at IS NOT NULL AND followup_sent_at >= datetime('now','-7 days')"
+            "WHERE followup_sent_at IS NOT NULL AND followup_sent_at >= datetime('now','-7 days') "
+            "AND (is_test IS NULL OR is_test = 0)"
         )
         sent = await cursor.fetchone()
         cursor = await self.conn.execute(
             "SELECT COUNT(*) as cnt FROM tickets "
-            "WHERE related_ticket_id IS NOT NULL AND created_at >= datetime('now','-7 days')"
+            "WHERE related_ticket_id IS NOT NULL AND created_at >= datetime('now','-7 days') "
+            "AND (is_test IS NULL OR is_test = 0)"
         )
         reopened = await cursor.fetchone()
         return {'sent_week': int(sent['cnt'] or 0), 'reopened_week': int(reopened['cnt'] or 0)}
+
+    async def set_ticket_test_flag(self, ticket_id: int, is_test: bool) -> bool:
+        """Помечает/снимает пометку «тестовая заявка» — заявка перестаёт (или начинает)
+        учитываться в статистике дашборда, но продолжает обрабатываться как обычно
+        (чат, статусы, уведомления не затрагиваются)."""
+        async with self.lock:
+            cursor = await self.conn.execute(
+                "UPDATE tickets SET is_test = ? WHERE id = ?",
+                (1 if is_test else 0, ticket_id)
+            )
+            await self.conn.commit()
+            return cursor.rowcount > 0
 
     async def get_sla_stats(self, sla_minutes: int) -> dict:
         """Публичная версия расчёта SLA (для тестов и внешнего использования)."""

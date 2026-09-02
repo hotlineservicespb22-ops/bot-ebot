@@ -144,6 +144,8 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
         f'<span class="kpi-lbl">Заявок взято в SLA</span></div>'
         f'<div class="kpi"><span class="kpi-val" id="w-followup">{dash["followup_stats"]["sent_week"]}/{dash["followup_stats"]["reopened_week"]}</span>'
         f'<span class="kpi-lbl">Опросы за нед. (отпр/повтор)</span></div>'
+        f'<div class="kpi"><span class="kpi-val" id="w-avg-reaction">{dash["avg_reaction"]["avg_min"]}м</span>'
+        f'<span class="kpi-lbl">Среднее время реакции</span></div>'
         f"</div>"
     )
 
@@ -205,6 +207,8 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
         "          if(e2){ e2.textContent = (d.sla_stats.in_sla_pct||0) + '%'; } }"
         "        if(d.followup_stats){ var e3=document.getElementById('w-followup');"
         "          if(e3){ e3.textContent = (d.followup_stats.sent_week||0) + '/' + (d.followup_stats.reopened_week||0); } }"
+        "        if(d.avg_reaction){ var e4=document.getElementById('w-avg-reaction');"
+        "          if(e4){ e4.textContent = (d.avg_reaction.avg_min||0) + 'м'; } }"
         "      })"
         "      .catch(function(){});"
         "  }"

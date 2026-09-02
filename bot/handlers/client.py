@@ -370,7 +370,7 @@ async def show_faq(message: Message, state: FSMContext):
     await state.clear()  # Сбрасываем FSM, чтобы FAQ не мешал оформлению заявки
     faq_text = (
         "❓ <b>Часто задаваемые вопросы (FAQ)</b>\n\n"
-        "🕐 <b>Режим работы:</b> заявки принимаем круглосуточно, 24/7. Реакция на обращение — в течение 15 минут.\n"
+        "🕐 <b>Режим работы:</b> заявки принимаем круглосуточно, 24/7. Реакция на обращение — в кратчайшие сроки.\n"
         "📞 Единый телефон: <b>8 800 777-38-56</b>\n"
         "✉️ E-mail: info@hotline-service.ru\n"
         "🌐 Сайт: <a href=\"https://hotline-service.ru\">hotline-service.ru</a>\n\n"
