@@ -186,12 +186,48 @@ async def _index_handler(request: web.Request, db: Database) -> web.Response:
             "✅ Проблемных заявок нет! Все оценки выше 3.</p></div>"
         )
 
+    # Последние переписки (любой статус и оценка — не только проблемные)
+    recent_chats = [t for t in dash.get("tickets_with_chat", []) if t.get("chat")][:15]
+    if recent_chats:
+        recent_rows = []
+        for t in recent_chats:
+            last_msg = t["chat"][-1]
+            preview = last_msg["text"] or ""
+            if len(preview) > 80:
+                preview = preview[:80] + "…"
+            role_icon = "👤" if last_msg["role"] == "client" else "👨‍🔧"
+            ticket_link = f'<a href="/ticket/{t["id"]}{key_param}">#{t["id"]}</a>'
+            client = _html.escape(str(t["client"]))
+            eng = _html.escape(str(t["engineer"]))
+            recent_rows.append(
+                f"<tr>"
+                f"<td>{ticket_link}</td>"
+                f"<td>{client}</td>"
+                f"<td>{eng}</td>"
+                f"<td>{_status_badge(t['status'])}</td>"
+                f"<td>{role_icon} {_html.escape(preview)}</td>"
+                f"<td>{_html.escape(last_msg['time'])}</td>"
+                f"</tr>"
+            )
+        recent_chats_html = (
+            '<div class="card"><h2>💬 Последние переписки</h2>'
+            "<table><thead><tr>"
+            "<th>№</th><th>Клиент</th><th>Инженер</th><th>Статус</th>"
+            "<th>Последнее сообщение</th><th>Когда</th>"
+            "</tr></thead><tbody>"
+            f"{''.join(recent_rows)}"
+            "</tbody></table></div>"
+        )
+    else:
+        recent_chats_html = ""
+
     body = (
         f'<div class="header">'
         f"<h1>🔴 Дашборд руководителя</h1>"
         f'<span class="badge">Hotline Service</span>'
         f"</div>"
         f"{kpi_html}"
+        f"{recent_chats_html}"
         f"{table_html}"
         '<script>'
         "(function(){"
