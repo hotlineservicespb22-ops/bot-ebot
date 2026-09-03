@@ -786,8 +786,9 @@ class Database:
             ratings = [{'name': r['name'], 'rating': round(r['avg_r'], 1), 'count': r['cnt']} for r in await cursor.fetchall()]
 
             # Города — разные написания одного города («вольск», «г.вольск», «спб»,
-            # «питер») схлопываются в каноничное имя по ключевым словам. Нераспознанный
-            # текст (не похож ни на один известный город) остаётся как есть.
+            # «питер») схлопываются в каноничное имя по ключевым словам. Текст, не
+            # похожий ни на один известный город (тестовые записи, названия компаний,
+            # ИНН и т.п.), в список не попадает — чтобы добавить город, дополните ckw.
             cursor = await self.conn.execute("""
                 SELECT company_city, COUNT(*) as cnt FROM tickets
                 WHERE company_city IS NOT NULL AND company_city != '' AND (is_test IS NULL OR is_test = 0)
@@ -800,17 +801,16 @@ class Database:
                 'Ростов-на-Дону': ['ростов'],
                 'Вольск': ['вольск'],
                 'Столбцы': ['столбцы'],
+                'Дзержинск': ['дзержинск'],
             }
             cc = {}
             for r in await cursor.fetchall():
                 raw = (r['company_city'] or '').strip()
                 low = raw.lower()
-                label = raw
                 for canon, keys in ckw.items():
                     if any(k in low for k in keys):
-                        label = canon
+                        cc[canon] = cc.get(canon, 0) + r['cnt']
                         break
-                cc[label] = cc.get(label, 0) + r['cnt']
             cities = [{'city': k, 'cnt': v} for k, v in sorted(cc.items(), key=lambda x: -x[1])][:10]
 
             # SLA-воронка + время реакции

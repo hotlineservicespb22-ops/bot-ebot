@@ -37,10 +37,17 @@ async def test_city_aliases_collapse_spb_variants(db: Database):
 
 
 @pytest.mark.asyncio
-async def test_unrecognized_city_kept_as_is(db: Database):
-    """Текст, не похожий ни на один известный город, остаётся без изменений."""
+async def test_unrecognized_text_excluded_from_cities(db: Database):
+    """Текст, не похожий ни на один известный город (тестовые записи, названия
+    компаний, ИНН и т.п.), не попадает в список городов вообще."""
     await _ticket_with_city(db, "Ромашка 771234567")
+    await _ticket_with_city(db, "тест тестовый тест")
+    await _ticket_with_city(db, "ИНН ООО ХОТЛАЙН СЕРВИС САМЫЕ ЛУЧШЕ")
+    await _ticket_with_city(db, "Казань")  # для контраста — этот должен попасть
 
     data = await db.get_dashboard_data(sla_minutes=15)
     cities = {c["city"]: c["cnt"] for c in data["cities"]}
-    assert cities.get("Ромашка 771234567") == 1
+    assert "Ромашка 771234567" not in cities
+    assert "тест тестовый тест" not in cities
+    assert "ИНН ООО ХОТЛАЙН СЕРВИС САМЫЕ ЛУЧШЕ" not in cities
+    assert cities.get("Казань") == 1
