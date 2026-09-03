@@ -818,8 +818,13 @@ async def followup_callback_handler(
     except Exception as e:
         logging.warning(f"Не удалось обновить сообщение follow-up по заявке #{ticket_id}: {e}")
 
-    # Уведомляем инженеров о новой (повторной) заявке.
+    # Уведомляем инженеров о новой (повторной) заявке: всех дежурных плюс инженера,
+    # который вёл исходную заявку (даже если он сейчас не на дежурстве — он знает
+    # историю станка и клиента).
     engineers = await db.get_engineers()
+    recipient_ids = {row['user_id'] for row in engineers}
+    if original['engineer_id']:
+        recipient_ids.add(original['engineer_id'])
     ticket_text = (
         f"🚨 <b>Повторная заявка #{new_ticket_id}</b> (связана с #{ticket_id})\n\n"
         f"🏢 <b>Компания/Город:</b> {html.escape(str(original['company_city'] or '—'))}\n"
@@ -827,8 +832,9 @@ async def followup_callback_handler(
         f"📝 <b>Проблема:</b> {html.escape(str(original['problem'] or '—'))}\n"
         f"📞 <b>Контакты:</b> {html.escape(str(original['contact'] or '—'))}"
     )
-    for row in engineers:
+    for eng_id in recipient_ids:
         try:
-            await bot.send_message(row['user_id'], ticket_text, reply_markup=ticket_action_kb(new_ticket_id))
+            sent_msg = await bot.send_message(eng_id, ticket_text, reply_markup=ticket_action_kb(new_ticket_id))
+            await db.save_ticket_notification(new_ticket_id, eng_id, sent_msg.message_id)
         except Exception as e:
-            logging.error(f"Не удалось уведомить инженера {row['user_id']} о повторной заявке #{new_ticket_id}: {e}")
+            logging.error(f"Не удалось уведомить инженера {eng_id} о повторной заявке #{new_ticket_id}: {e}")
