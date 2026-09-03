@@ -70,6 +70,15 @@ try:
 except ValueError:
     logging.getLogger("bot.config").warning("Некорректное значение FSM_TIMEOUT, используется значение по умолчанию 1800")
     FSM_TIMEOUT = 1800
+# Через сколько дней после ЗАКРЫТИЯ заявки удалять её локальные медиафайлы
+# (media/ticket_<id>/) — каталог media/ иначе растёт бессрочно. По умолчанию
+# 0 = выключено (ничего не удаляется), т.к. это необратимая операция. Включайте
+# осознанно, когда убедитесь, что нужные файлы уже есть в Битрикс24/бэкапах.
+try:
+    MEDIA_RETENTION_DAYS = int(os.getenv("MEDIA_RETENTION_DAYS", "0"))
+except ValueError:
+    logging.getLogger("bot.config").warning("Некорректное значение MEDIA_RETENTION_DAYS, используется 0 (выключено)")
+    MEDIA_RETENTION_DAYS = 0
 REDIS_URL = os.getenv("REDIS_URL", "")  # Если задан — используется RedisStorage для FSM
 # Кулдаун между созданием заявок одним клиентом (в секундах) — защита от спама воронкой.
 try:

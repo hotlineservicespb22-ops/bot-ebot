@@ -580,6 +580,18 @@ class Database:
             )
             return await cursor.fetchall()
 
+    async def get_ticket_ids_for_media_cleanup(self, retention_days: int) -> list[int]:
+        """Возвращает ID закрытых заявок (completed/canceled), закрытых более
+        retention_days дней назад — кандидаты на удаление локальных медиафайлов."""
+        async with self.lock:
+            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=retention_days)).isoformat()
+            cursor = await self.conn.execute(
+                "SELECT id FROM tickets WHERE status IN ('completed', 'canceled') "
+                "AND closed_at IS NOT NULL AND closed_at < ?",
+                (cutoff,)
+            )
+            return [row['id'] for row in await cursor.fetchall()]
+
     async def mark_followup_sent(self, ticket_id: int) -> None:
         """Проставляет followup_sent_at (факт отправки опроса)."""
         async with self.lock:

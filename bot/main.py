@@ -5,6 +5,7 @@ import hmac
 import html
 import logging
 import os
+import shutil
 import signal
 import sys
 import traceback
@@ -31,6 +32,8 @@ from bot.config import (
     LOG_LEVEL,
     MANAGER_DASHBOARD_HOST,
     MANAGER_DASHBOARD_PORT,
+    MEDIA_DIR,
+    MEDIA_RETENTION_DAYS,
     REDIS_URL,
     TICKET_TIMEOUT,
     WEBHOOK_HOST,
@@ -242,6 +245,8 @@ async def main():
     heartbeat_task = asyncio.create_task(heartbeat_writer())
     # Фоновая задача повторного опроса клиентов после завершения заявок.
     followup_task = asyncio.create_task(followup_watcher(bot, db))
+    # Фоновая задача очистки старых медиафайлов (выключена по умолчанию, см. MEDIA_RETENTION_DAYS).
+    media_cleanup_task = asyncio.create_task(media_cleanup_watcher(db))
 
     try:
         if WEBHOOK_URL:
@@ -296,6 +301,7 @@ async def main():
         timeout_task.cancel()
         heartbeat_task.cancel()
         followup_task.cancel()
+        media_cleanup_task.cancel()
         if WEBHOOK_URL:
             await bot.delete_webhook()
         await shutdown()
@@ -392,6 +398,41 @@ async def followup_watcher(bot: Bot, db: Database):
         except Exception as e:
             logger.error(f"Ошибка в фоновой задаче followup-опроса: {e}")
         await asyncio.sleep(FOLLOWUP_INTERVAL)
+
+
+async def run_media_cleanup(db: Database) -> None:
+    """Один проход очистки: удаляет media/ticket_<id>/ для давно закрытых заявок.
+
+    Выделен отдельно от цикла, чтобы его можно было тестировать без реального ожидания.
+    Ничего не делает, если MEDIA_RETENTION_DAYS <= 0 (выключено по умолчанию).
+    """
+    if MEDIA_RETENTION_DAYS <= 0:
+        return
+    ticket_ids = await db.get_ticket_ids_for_media_cleanup(MEDIA_RETENTION_DAYS)
+    for ticket_id in ticket_ids:
+        ticket_dir = os.path.join(MEDIA_DIR, f"ticket_{ticket_id}")
+        if not os.path.isdir(ticket_dir):
+            continue
+        try:
+            await asyncio.to_thread(shutil.rmtree, ticket_dir)
+            logger.info("Удалены локальные медиафайлы заявки #%s (%s)", ticket_id, ticket_dir)
+        except OSError as e:
+            logger.error("Не удалось удалить медиафайлы заявки #%s (%s): %s", ticket_id, ticket_dir, e)
+
+
+async def media_cleanup_watcher(db: Database):
+    """Фоновая задача: раз в сутки удаляет локальные медиафайлы давно закрытых заявок.
+
+    Выключена по умолчанию (MEDIA_RETENTION_DAYS=0) — это необратимая операция,
+    включать нужно осознанно (см. комментарий у MEDIA_RETENTION_DAYS в config.py).
+    """
+    CLEANUP_INTERVAL = 86400  # 1 сутки
+    while True:
+        try:
+            await run_media_cleanup(db)
+        except Exception as e:
+            logger.error(f"Ошибка в фоновой задаче очистки медиафайлов: {e}")
+        await asyncio.sleep(CLEANUP_INTERVAL)
 
 
 def _write_heartbeat(filepath: str, data: str) -> None:
