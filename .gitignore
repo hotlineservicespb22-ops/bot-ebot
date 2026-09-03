@@ -43,5 +43,9 @@ Thumbs.db
 # Media files (фото/видео заявок)
 media/
 
+# Локальные резервные копии (см. backup.sh) — содержат данные клиентов
+backups/
+.backup.log
+
 # Внутренняя база знаний (PDF)
 *.pdf
