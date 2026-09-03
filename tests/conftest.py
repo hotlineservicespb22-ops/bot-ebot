@@ -69,6 +69,19 @@ def fake_admin_user() -> User:
 
 
 @pytest.fixture
+def fake_manager_user() -> User:
+    """Создаёт фейкового пользователя-руководителя."""
+    return User(
+        id=5551234567,
+        is_bot=False,
+        first_name="Руководитель",
+        last_name="Отдела",
+        username="manager_user",
+        language_code="ru",
+    )
+
+
+@pytest.fixture
 def fake_chat(fake_user: User) -> Chat:
     """Создаёт фейковый чат."""
     return Chat(
