@@ -189,21 +189,18 @@ async def _require_engineer(callback: CallbackQuery, is_engineer: bool) -> bool:
         return False
     return True
 
-@router.callback_query(TicketCallback.filter(F.action == "select"))
-
-@router.callback_query(TicketCallback.filter(F.action == "view"))
-async def view_ticket_info(callback: CallbackQuery, callback_data: TicketCallback, db: Database):
-    """Показывает детальную информацию о заявке без взятия в работу."""
+@router.callback_query(TicketCallback.filter(F.action == "peek"))
+async def view_ticket_info(callback: CallbackQuery, callback_data: TicketCallback, db: Database, is_engineer: bool):
+    """Показывает детальную информацию о заявке без взятия в работу (кнопка «👁 Посмотреть»)."""
+    if not await _require_engineer(callback, is_engineer):
+        return
     await callback.answer()
     ticket = await db.get_ticket(callback_data.ticket_id)
     if not ticket:
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
-    # При переключении инженера на эту заявку (select) возобновляем её сессию.
-    if callback_data.action == "select" and ticket['status'] == 'in_progress':
-        await db.resume_session(callback_data.ticket_id)
     detail = await build_ticket_detail(db, ticket)
-    
+
     # Показываем правильные кнопки в зависимости от статуса
     if ticket['status'] == 'open':
         kb = ticket_action_kb(callback_data.ticket_id)
@@ -211,15 +208,20 @@ async def view_ticket_info(callback: CallbackQuery, callback_data: TicketCallbac
         kb = engineer_redirect_kb(callback_data.ticket_id)
     else:
         kb = None
-    
+
     await callback.message.answer(detail, reply_markup=kb)
 
 
 @router.callback_query(TicketCallback.filter(F.action == "select"))
-async def select_ticket_for_reply(callback: CallbackQuery, callback_data: TicketCallback, state: FSMContext, is_engineer: bool):
+async def select_ticket_for_reply(callback: CallbackQuery, callback_data: TicketCallback, db: Database, state: FSMContext, is_engineer: bool):
     if not await _require_engineer(callback, is_engineer):
         return
     await callback.answer()  # Быстрый ответ Telegram для снятия спиннера на кнопке
+    # Возобновляем сессию заявки (session_started_at), если инженер переключается
+    # на другую свою активную заявку — иначе время простоя между заявками не считается.
+    ticket = await db.get_ticket(callback_data.ticket_id)
+    if ticket and ticket['status'] == 'in_progress':
+        await db.resume_session(callback_data.ticket_id)
     # Устанавливаем активную заявку, НЕ очищая state целиком.
     # state.clear() стирает навигацию по списку заявок (ticket_view_ids/index/mode),
     # из-за чего после переключения список заявок инженера "пропадает".

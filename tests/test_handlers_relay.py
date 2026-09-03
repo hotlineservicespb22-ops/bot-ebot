@@ -267,20 +267,20 @@ class TestSelectTicket:
         callback.message.answer = AsyncMock()
         callback.answer = AsyncMock()
 
-        await select_ticket_for_reply(callback, callback_data, relay_fsm_context, is_engineer=True)
+        await select_ticket_for_reply(callback, callback_data, db, relay_fsm_context, is_engineer=True)
 
         # Заявка должна быть установлена как активная
         data = await relay_fsm_context.get_data()
         assert data.get("active_ticket_id") == ticket_id
 
-    async def test_select_ticket_not_engineer(self, fake_user, relay_fsm_context):
+    async def test_select_ticket_not_engineer(self, db, fake_user, relay_fsm_context):
         """Проверяет выбор заявки не инженером."""
         callback_data = TicketCallback(action="select", ticket_id=1)
         callback = AsyncMock()
         callback.from_user = fake_user
         callback.answer = AsyncMock()
 
-        await select_ticket_for_reply(callback, callback_data, relay_fsm_context, is_engineer=False)
+        await select_ticket_for_reply(callback, callback_data, db, relay_fsm_context, is_engineer=False)
         callback.answer.assert_called_with("У вас нет прав инженера.", show_alert=True)
 
 
@@ -401,11 +401,11 @@ class TestViewTicket:
         callback.answer.assert_called_with("Заявка не найдена.", show_alert=True)
 
 
-class TestViewTicketInfoResumeSession:
-    """Тесты: select-запрос инженера возобновляет сессию заявки (полный путь через view_ticket_info)."""
+class TestSelectResumesSession:
+    """select_ticket_for_reply возобновляет сессию заявки при переключении инженера на неё."""
 
-    async def test_select_calls_resume_session_with_correct_ticket_id(
-        self, db_with_active_ticket, fake_engineer_user, monkeypatch
+    async def test_select_calls_resume_session_for_in_progress_ticket(
+        self, db_with_active_ticket, fake_engineer_user, relay_fsm_context, monkeypatch
     ):
         """Весь путь от callback (action=select) до db.resume_session(ticket_id)."""
         db, ticket_id = db_with_active_ticket
@@ -416,34 +416,76 @@ class TestViewTicketInfoResumeSession:
         callback = AsyncMock()
         callback.from_user = fake_engineer_user
         callback.message = AsyncMock()
+        callback.message.edit_reply_markup = AsyncMock()
         callback.message.answer = AsyncMock()
         callback.answer = AsyncMock()
 
-        await view_ticket_info(callback, callback_data, db)
+        await select_ticket_for_reply(callback, callback_data, db, relay_fsm_context, is_engineer=True)
 
         # db.resume_session вызван ровно один раз с корректным ticket_id.
         resume_spy.assert_awaited_once_with(ticket_id)
-        callback.answer.assert_awaited()          # снятие спиннера на кнопке
-        callback.message.answer.assert_awaited_once()  # инженеру показаны детали заявки
 
-    async def test_view_action_does_not_resume_session(
-        self, db_with_active_ticket, fake_engineer_user, monkeypatch
+    async def test_select_skips_resume_session_for_open_ticket(
+        self, db, fake_user, fake_engineer_user, relay_fsm_context, monkeypatch
     ):
-        """action=view не должен возобновлять сессию (возобновление только при select)."""
-        db, ticket_id = db_with_active_ticket
+        """Заявка ещё не в работе (открыта) — возобновлять сессию нечего."""
+        ticket_id = await db.create_ticket(
+            client_id=fake_user.id, client_name="Клиент", company="",
+            equipment_type="", brand="", cnc_model="", problem="Проблема",
+            media_id=None, city="", inn_contract="", contact="1",
+        )
+        await db.add_engineer(fake_engineer_user.id, "Инженер")
         resume_spy = AsyncMock()
         monkeypatch.setattr(db, "resume_session", resume_spy)
 
-        callback_data = TicketCallback(action="view", ticket_id=ticket_id)
+        callback_data = TicketCallback(action="select", ticket_id=ticket_id)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.message = AsyncMock()
+        callback.message.edit_reply_markup = AsyncMock()
+        callback.message.answer = AsyncMock()
+        callback.answer = AsyncMock()
+
+        await select_ticket_for_reply(callback, callback_data, db, relay_fsm_context, is_engineer=True)
+
+        resume_spy.assert_not_awaited()
+
+
+class TestViewTicketInfoPeek:
+    """view_ticket_info (кнопка «👁 Посмотреть», action=peek) — доступна только инженерам
+    и не влияет на сессию заявки (это отдельное действие от select/view)."""
+
+    async def test_peek_requires_engineer(self, db, fake_user):
+        callback_data = TicketCallback(action="peek", ticket_id=1)
+        callback = AsyncMock()
+        callback.from_user = fake_user
+        callback.answer = AsyncMock()
+
+        await view_ticket_info(callback, callback_data, db, is_engineer=False)
+        callback.answer.assert_called_with("У вас нет прав инженера.", show_alert=True)
+
+    async def test_peek_shows_ticket_detail(self, db_with_active_ticket, fake_engineer_user):
+        db, ticket_id = db_with_active_ticket
+        callback_data = TicketCallback(action="peek", ticket_id=ticket_id)
         callback = AsyncMock()
         callback.from_user = fake_engineer_user
         callback.message = AsyncMock()
         callback.message.answer = AsyncMock()
         callback.answer = AsyncMock()
 
-        await view_ticket_info(callback, callback_data, db)
+        await view_ticket_info(callback, callback_data, db, is_engineer=True)
 
-        resume_spy.assert_not_awaited()
+        callback.message.answer.assert_awaited_once()
+
+    async def test_peek_ticket_not_found(self, db, fake_engineer_user):
+        callback_data = TicketCallback(action="peek", ticket_id=99999)
+        callback = AsyncMock()
+        callback.from_user = fake_engineer_user
+        callback.answer = AsyncMock()
+
+        await view_ticket_info(callback, callback_data, db, is_engineer=True)
+
+        callback.answer.assert_called_with("Заявка не найдена.", show_alert=True)
 
 
 # ===================== Тесты навигации =====================

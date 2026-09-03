@@ -116,7 +116,7 @@ def ticket_action_kb(ticket_id: int):
             ),
             InlineKeyboardButton(
                 text="👁 Посмотреть",
-                callback_data=TicketCallback(action="view", ticket_id=ticket_id).pack()
+                callback_data=TicketCallback(action="peek", ticket_id=ticket_id).pack()
             ),
         ]]
     )
