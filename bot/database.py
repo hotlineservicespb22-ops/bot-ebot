@@ -918,23 +918,29 @@ class Database:
             """)
             tickets_raw = await cursor.fetchall()
 
-            tickets_with_chat = []
-            for tk in tickets_raw:
+            # Переписка для всех 30 заявок одним запросом (вместо запроса на каждую
+            # заявку в цикле) — цикл держал общую блокировку self.lock надолго,
+            # блокируя обработку сообщений Telegram на время рендера дашборда.
+            ticket_ids = [tk['id'] for tk in tickets_raw]
+            chats_by_ticket: dict[int, list] = {tid: [] for tid in ticket_ids}
+            if ticket_ids:
+                placeholders = ','.join('?' * len(ticket_ids))
                 c = await self.conn.execute(
-                    "SELECT sender_role, text, created_at FROM messages "
-                    "WHERE ticket_id = ? AND (media_type IS NULL OR media_type = '') "
-                    "ORDER BY created_at ASC",
-                    (tk['id'],)
+                    f"SELECT ticket_id, sender_role, text, created_at FROM messages "
+                    f"WHERE ticket_id IN ({placeholders}) AND (media_type IS NULL OR media_type = '') "
+                    f"ORDER BY ticket_id, created_at ASC",
+                    ticket_ids
                 )
-                msgs = await c.fetchall()
-                chat = [
-                    {
+                for m in await c.fetchall():
+                    chats_by_ticket[m['ticket_id']].append({
                         'role': m['sender_role'],
                         'text': m['text'] or '',
                         'time': (m['created_at'] or '')[:16].replace('T', ' ')
-                    }
-                    for m in msgs
-                ]
+                    })
+
+            tickets_with_chat = []
+            for tk in tickets_raw:
+                chat = chats_by_ticket[tk['id']]
                 stars = '★' * (tk['rating'] or 0)
                 tickets_with_chat.append({
                     'id': tk['id'],
