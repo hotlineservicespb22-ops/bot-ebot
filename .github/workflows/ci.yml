@@ -33,3 +33,38 @@ jobs:
           ADMIN_IDS: "123456"
         run: |
           pytest -v
+
+      # Отчёт об уязвимостях в зависимостях. Не блокирует сборку (continue-on-error) —
+      # это первый прогон на этом проекте, нет ещё политики триажа находок. Когда
+      # разберётесь с текущим отчётом, уберите continue-on-error, чтобы CI падал
+      # на новых уязвимостях.
+      - name: Audit dependencies (pip-audit)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
+
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: bot-ebot-bot:ci
+          load: true
+
+      # exit-code 0 = отчёт, не блокирует сборку — тот же резон, что у pip-audit
+      # выше: нет ещё политики триажа находок в базовом образе python:3.12-slim.
+      # Поставьте exit-code: "1", когда решите, что CI должен падать на находках.
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: bot-ebot-bot:ci
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+          format: "table"
