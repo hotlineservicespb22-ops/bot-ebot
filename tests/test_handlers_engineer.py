@@ -488,6 +488,43 @@ class TestSendPreAssignClientMessages:
         # Отправлено только 1 фото (ошибки), шильда пропущена
         assert mock_bot.send_photo.call_count == 1
 
+    async def test_media_still_sent_when_text_send_fails(
+        self, db, fake_user, fake_engineer_user, mock_bot, tmp_path
+    ):
+        """Сбой отправки текстового уточнения не должен блокировать пересылку медиа.
+
+        Раньше текст и медиа были в одном try/except на всю функцию — сбой на
+        первом же send_message (например, временная ошибка Telegram API) обрывал
+        функцию, и инженер не получал медиафайлы клиента вообще.
+        """
+        ticket_id = await db.create_ticket(
+            client_id=fake_user.id,
+            client_name="Клиент Тест",
+            company="", equipment_type="", brand="", cnc_model="",
+            problem="Ошибка",
+            media_id=None, city="", inn_contract="", contact="+7999",
+            machine_info="Станок",
+            company_city="Москва",
+        )
+        await db.save_message(ticket_id, fake_user.id, "client", "Уточнение по проблеме", None)
+        media_path = tmp_path / "photo.jpg"
+        media_path.write_bytes(b"fake_image_data")
+        await db.save_media(
+            ticket_id=ticket_id,
+            file_id="error_photo_file_id",
+            file_type="photo",
+            file_path=str(media_path),
+            sender_id=fake_user.id,
+            sender_role="client",
+        )
+
+        mock_bot.send_message = AsyncMock(side_effect=Exception("Telegram API temporarily unavailable"))
+
+        await _send_pre_assign_client_messages(mock_bot, db, ticket_id, fake_engineer_user.id)
+
+        # Текст не ушёл (send_message падал), но медиа всё равно отправлено.
+        assert mock_bot.send_photo.called
+
 
 class TestDeleteTicketNotifications:
     """Тесты для _delete_ticket_notifications."""

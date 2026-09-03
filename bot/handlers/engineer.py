@@ -174,7 +174,13 @@ async def take_ticket(callback: CallbackQuery, callback_data: TicketCallback, bo
 
 
 async def _send_pre_assign_client_messages(bot: Bot, db: Database, ticket_id: int, engineer_id: int):
-    """Отправляет инженеру уточнения клиента, накопленные до взятия заявки в работу."""
+    """Отправляет инженеру уточнения клиента, накопленные до взятия заявки в работу.
+
+    Текст и медиа пересылаются в НЕЗАВИСИМЫХ try/except — раньше был один общий
+    блок на всю функцию, и сбой при отправке текстового уточнения (например,
+    временная ошибка Telegram API) молча пропускал пересылку медиафайлов клиента,
+    хотя это не связанные друг с другом действия.
+    """
     try:
         messages = await db.get_messages_for_ticket(ticket_id)
         # Только сообщения клиента (отправленные до назначения инженера)
@@ -196,7 +202,10 @@ async def _send_pre_assign_client_messages(bot: Bot, db: Database, ticket_id: in
                 line = f"{text} {label}".strip()
                 if line:
                     await bot.send_message(engineer_id, html.escape(line))
+    except Exception as e:
+        logger.warning(f"Не удалось передать текстовые уточнения клиента инженеру {engineer_id} для заявки #{ticket_id}: {e}")
 
+    try:
         # Фото/видео шильдика станка уже отправляются инженеру отдельно в take_ticket
         # (через machine_media_id) — исключаем дублирование при пересылке медиа.
         ticket = await db.get_ticket(ticket_id)
@@ -227,7 +236,7 @@ async def _send_pre_assign_client_messages(bot: Bot, db: Database, ticket_id: in
                 except Exception as e:
                     logger.warning(f"Не удалось переслать медиа клиента инженеру {engineer_id}: {e}")
     except Exception as e:
-        logger.warning(f"Не удалось передать уточнения клиента инженеру для заявки #{ticket_id}: {e}")
+        logger.warning(f"Не удалось передать медиафайлы клиента инженеру {engineer_id} для заявки #{ticket_id}: {e}")
 
 @router.callback_query(TicketCallback.filter(F.action == "complete"))
 async def complete_ticket_by_engineer(callback: CallbackQuery, callback_data: TicketCallback, bot: Bot, db: Database, state: FSMContext, is_engineer: bool):

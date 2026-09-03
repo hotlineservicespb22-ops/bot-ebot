@@ -104,6 +104,32 @@ class TestErrorHandler:
             await error_handler(error_event, mock_bot, db)
             mock_bot.send_message.assert_awaited()
 
+    async def test_one_blocked_admin_does_not_stop_others(self, mock_bot, db):
+        """Заблокировавший бота админ не должен мешать уведомлению остальных
+        (раньше рассылка шла одним циклом без try/except на каждого получателя —
+        первый же сбой обрывал цикл, и следующие админы не получали уведомление
+        о критической ошибке бота)."""
+        from aiogram.types import ErrorEvent
+
+        error_event = MagicMock(spec=ErrorEvent)
+        error_event.exception = ValueError("test error")
+        error_event.exception.__traceback__ = None
+
+        async def _send(chat_id, *args, **kwargs):
+            if chat_id == 111:
+                raise Exception("bot was blocked by the user")
+            return None
+
+        mock_bot.send_message = AsyncMock(side_effect=_send)
+
+        with patch("bot.main.ADMIN_IDS", [111, 222, 333]):
+            await error_handler(error_event, mock_bot, db)
+
+        notified = {c.args[0] for c in mock_bot.send_message.await_args_list}
+        assert notified == {111, 222, 333}  # попытка была для всех
+        # получили реальное сообщение (не исключение) двое из трёх
+        assert mock_bot.send_message.await_count == 3
+
 
 class TestTicketTimeoutWatcher:
     async def test_escalates_expired_tickets(self, mock_bot, db):

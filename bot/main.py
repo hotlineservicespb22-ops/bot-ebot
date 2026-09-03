@@ -177,9 +177,12 @@ async def error_handler(event: ErrorEvent, bot: Bot, db: Database):
             if len(error_message) > 4000:
                 error_message = error_message[:4000] + "\n...(обрезано)"
             for admin_id in admin_ids:
-                await bot.send_message(admin_id, error_message)
+                try:
+                    await bot.send_message(admin_id, error_message)
+                except Exception as e:
+                    logger.warning(f"Не удалось уведомить администратора {admin_id} о критической ошибке: {e}")
         except Exception as e:
-            logger.error(f"Не удалось уведомить администраторов об ошибке: {e}")
+            logger.error(f"Не удалось подготовить уведомление администраторов об ошибке: {e}")
 
 
 async def main():
